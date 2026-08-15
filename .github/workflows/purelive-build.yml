@@ -45,7 +45,7 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
   # =========================================================
-  # 2. 编译 iOS IPA
+  # 2. 编译 iOS
   # =========================================================
   build-ios:
     name: 编译 iOS IPA
@@ -55,7 +55,7 @@ jobs:
 
     steps:
       # -----------------------------------------------------
-      # 1. 查看 Xcode / iOS SDK
+      # 1. 查看编译环境
       # -----------------------------------------------------
       - name: 查看 Xcode 和 iOS SDK
         shell: bash
@@ -72,7 +72,7 @@ jobs:
           xcrun --sdk iphoneos --show-sdk-version
 
       # -----------------------------------------------------
-      # 2. 下载 Pure Live 官方源码
+      # 2. 下载上游 Pure Live 源码
       # -----------------------------------------------------
       - name: 下载 Pure Live 源码
         shell: bash
@@ -88,13 +88,11 @@ jobs:
             source
 
       # -----------------------------------------------------
-      # 3. 修复 Pure Live v2.0.23 的 file_picker 依赖
+      # 3. 固定 v2.0.23 当前需要的 file_picker
       #
-      # Pure Live 源码使用的是旧的 FilePickerResult API。
-      # ^12.0.0-beta.5 现在可能升级到新的正式版 12.x，
-      # 因此这里自动锁定到 12.0.0-beta.5。
+      # 如果以后上游已经改了依赖，这一步会自动跳过
       # -----------------------------------------------------
-      - name: 固定 file_picker 兼容版本
+      - name: 修复 file_picker 兼容问题
         shell: bash
         run: |
           echo "=========================================="
@@ -115,15 +113,14 @@ jobs:
           if old in text:
               text = text.replace(old, new)
               path.write_text(text, encoding="utf-8")
-              print("✅ 已将 file_picker 锁定为 12.0.0-beta.5")
+              print("✅ 已固定 file_picker 12.0.0-beta.5")
           elif new in text:
-              print("✅ file_picker 已经是 12.0.0-beta.5")
+              print("✅ 已经固定，无需修改")
           else:
-              print("ℹ️ 当前上游已经修改 file_picker 配置，不强制修改")
+              print("ℹ️ 上游 file_picker 已变化，本次不修改")
           PY
 
           echo ""
-          echo "修改后："
           grep -n "file_picker:" source/pubspec.yaml || true
 
       # -----------------------------------------------------
@@ -141,19 +138,12 @@ jobs:
       - name: 查看 Flutter 和 Dart 版本
         shell: bash
         run: |
-          echo "========== Flutter =========="
           flutter --version
-
-          echo ""
-          echo "========== Dart =========="
           dart --version
-
-          echo ""
-          echo "========== Flutter Doctor =========="
           flutter doctor -v
 
       # -----------------------------------------------------
-      # 6. 清理并获取依赖
+      # 6. 清理 + 获取依赖
       # -----------------------------------------------------
       - name: 获取 Flutter 依赖
         working-directory: source
@@ -163,14 +153,236 @@ jobs:
           flutter pub get
 
           echo ""
-          echo "=========================================="
-          echo "检查最终 file_picker 版本"
-          echo "=========================================="
-
+          echo "========== file_picker 最终版本 =========="
           flutter pub deps | grep -E "file_picker|file_picker_platform" || true
 
       # -----------------------------------------------------
-      # 7. 编译无签名 iOS
+      # 7. 修改 Podfile
+      #
+      # 删除 ShareExtension 的 CocoaPods target
+      # -----------------------------------------------------
+      - name: 从 Podfile 移除 ShareExtension
+        shell: bash
+        run: |
+          echo "=========================================="
+          echo "修改 ios/Podfile"
+          echo "=========================================="
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("source/ios/Podfile")
+          text = path.read_text(encoding="utf-8")
+
+          original = text
+
+          # 当前 Pure Live 使用了这组注释标记
+          text = re.sub(
+              r'\n\s*# share_handler addition start.*?# share_handler addition end\s*\n',
+              '\n',
+              text,
+              flags=re.S
+          )
+
+          # 备用处理：如果将来注释标记没了，继续尝试删除 target
+          text = re.sub(
+              r"\n\s*target 'ShareExtension' do.*?\n\s*end\s*\n",
+              '\n',
+              text,
+              flags=re.S
+          )
+
+          path.write_text(text, encoding="utf-8")
+
+          if text != original:
+              print("✅ 已从 Podfile 删除 ShareExtension")
+          else:
+              print("ℹ️ Podfile 中没有找到 ShareExtension 配置")
+
+          if "target 'ShareExtension'" in text:
+              raise SystemExit("❌ Podfile 仍然存在 ShareExtension")
+          PY
+
+          echo ""
+          echo "========== 修改后的 Podfile =========="
+          cat source/ios/Podfile
+
+      # -----------------------------------------------------
+      # 8. 从 Xcode 工程彻底移除 ShareExtension
+      #
+      # 使用 CocoaPods 自带的 xcodeproj Ruby 库
+      # -----------------------------------------------------
+      - name: 从 Xcode 工程移除 ShareExtension
+        shell: bash
+        run: |
+          echo "=========================================="
+          echo "移除 ShareExtension Xcode Target"
+          echo "=========================================="
+
+          cat > /tmp/remove_share_extension.rb <<'RUBY'
+          require 'xcodeproj'
+
+          project_path = 'source/ios/Runner.xcodeproj'
+          project = Xcodeproj::Project.open(project_path)
+
+          runner = project.targets.find { |t| t.name == 'Runner' }
+          share  = project.targets.find { |t| t.name == 'ShareExtension' }
+
+          unless runner
+            abort '❌ 找不到 Runner Target'
+          end
+
+          puts "✅ 找到 Runner Target"
+
+          # -------------------------------------------------
+          # 删除 Runner -> ShareExtension 的 Target Dependency
+          # -------------------------------------------------
+          if share
+            runner.dependencies.dup.each do |dependency|
+              begin
+                if dependency.target == share
+                  puts "删除 Runner -> ShareExtension 依赖"
+                  dependency.remove_from_project
+                end
+              rescue
+              end
+            end
+          end
+
+          # -------------------------------------------------
+          # 删除 Embed Foundation Extensions Copy Files 阶段
+          # -------------------------------------------------
+          runner.copy_files_build_phases.dup.each do |phase|
+            if phase.name == 'Embed Foundation Extensions'
+              puts "删除 Embed Foundation Extensions"
+              phase.remove_from_project
+            end
+          end
+
+          # -------------------------------------------------
+          # Runner 不再需要 ShareExtension 使用的 App Group
+          # -------------------------------------------------
+          runner.build_configurations.each do |config|
+            if config.build_settings.key?('CODE_SIGN_ENTITLEMENTS')
+              puts "移除 #{config.name} 的 CODE_SIGN_ENTITLEMENTS"
+              config.build_settings.delete('CODE_SIGN_ENTITLEMENTS')
+            end
+          end
+
+          # -------------------------------------------------
+          # 删除 ShareExtension Target
+          # -------------------------------------------------
+          if share
+            puts "删除 ShareExtension Target"
+            share.remove_from_project
+          else
+            puts "ℹ️ ShareExtension Target 已不存在"
+          end
+
+          # -------------------------------------------------
+          # 清理残留 ShareExtension.appex
+          # -------------------------------------------------
+          project.files.dup.each do |file|
+            if file.path == 'ShareExtension.appex'
+              puts "删除 ShareExtension.appex 引用"
+              file.remove_from_project
+            end
+          end
+
+          # -------------------------------------------------
+          # 清理 ShareExtension 工程组
+          # -------------------------------------------------
+          project.groups.dup.each do |group|
+            if group.display_name == 'ShareExtension'
+              puts "删除 ShareExtension 工程组"
+              group.remove_from_project
+            end
+          end
+
+          project.save
+
+          puts
+          puts "=========================================="
+          puts "修改完成"
+          puts "剩余 Target："
+          project.targets.each do |target|
+            puts "- #{target.name}"
+          end
+          puts "=========================================="
+          RUBY
+
+          ruby /tmp/remove_share_extension.rb
+
+      # -----------------------------------------------------
+      # 9. 删除物理 ShareExtension 文件夹
+      # -----------------------------------------------------
+      - name: 删除 ShareExtension 文件
+        shell: bash
+        run: |
+          rm -rf source/ios/ShareExtension
+
+          echo "✅ ShareExtension 文件夹已删除"
+
+      # -----------------------------------------------------
+      # 10. 检查 ShareExtension 是否还有残留
+      # -----------------------------------------------------
+      - name: 检查 ShareExtension
+        shell: bash
+        run: |
+          echo "=========================================="
+          echo "检查 Xcode Target"
+          echo "=========================================="
+
+          xcodebuild \
+            -project source/ios/Runner.xcodeproj \
+            -list
+
+          echo ""
+          echo "=========================================="
+          echo "检查关键残留"
+          echo "=========================================="
+
+          if grep -q "Embed Foundation Extensions" \
+            source/ios/Runner.xcodeproj/project.pbxproj; then
+              echo "❌ 仍存在 Embed Foundation Extensions"
+              exit 1
+          fi
+
+          if grep -q "PBXNativeTarget.*ShareExtension" \
+            source/ios/Runner.xcodeproj/project.pbxproj; then
+              echo "❌ 仍存在 ShareExtension Target"
+              exit 1
+          fi
+
+          if grep -q "target 'ShareExtension'" source/ios/Podfile; then
+              echo "❌ Podfile 仍存在 ShareExtension"
+              exit 1
+          fi
+
+          echo ""
+          echo "✅ ShareExtension 已从编译链移除"
+
+      # -----------------------------------------------------
+      # 11. 重新安装 CocoaPods
+      # -----------------------------------------------------
+      - name: 安装 iOS Pods
+        working-directory: source/ios
+        shell: bash
+        run: |
+          echo "=========================================="
+          echo "CocoaPods"
+          echo "=========================================="
+
+          pod --version
+
+          rm -rf Pods
+          rm -f Podfile.lock
+
+          pod install
+
+      # -----------------------------------------------------
+      # 12. 编译 iOS
       # -----------------------------------------------------
       - name: 编译无签名 iOS
         working-directory: source
@@ -178,6 +390,7 @@ jobs:
         run: |
           echo "=========================================="
           echo "开始编译 Pure Live iOS"
+          echo "ShareExtension 已禁用"
           echo "=========================================="
 
           flutter build ios \
@@ -185,87 +398,55 @@ jobs:
             --no-codesign
 
       # -----------------------------------------------------
-      # 8. 检查 Runner.app
+      # 13. 检查 Runner.app
       # -----------------------------------------------------
       - name: 检查 iOS 编译结果
         shell: bash
         run: |
-          echo "=========================================="
-          echo "检查 Runner.app"
-          echo "=========================================="
-
           if [ ! -d "source/build/ios/iphoneos/Runner.app" ]; then
             echo "❌ 没有找到 Runner.app"
             exit 1
           fi
 
+          echo "=========================================="
           echo "✅ Runner.app 编译成功"
+          echo "=========================================="
 
-          echo ""
-          echo "Runner.app 大小："
           du -sh source/build/ios/iphoneos/Runner.app
 
+          echo ""
+          echo "检查是否还有 PlugIns："
+
+          if [ -d "source/build/ios/iphoneos/Runner.app/PlugIns" ]; then
+            ls -la source/build/ios/iphoneos/Runner.app/PlugIns
+          else
+            echo "✅ 没有 PlugIns / ShareExtension"
+          fi
+
       # -----------------------------------------------------
-      # 9. 制作普通无签名 IPA
+      # 14. 制作 LiveContainer IPA
       # -----------------------------------------------------
-      - name: 制作普通 IPA
+      - name: 制作 IPA
         shell: bash
         run: |
           TAG="${{ needs.prepare.outputs.tag }}"
           VERSION="${TAG#v}"
 
           echo "=========================================="
-          echo "制作普通 IPA"
-          echo "版本：$VERSION"
+          echo "制作 IPA：$VERSION"
           echo "=========================================="
 
-          rm -rf build-normal
-          mkdir -p build-normal/Payload
+          rm -rf ipa
+          mkdir -p ipa/Payload
 
           cp -R \
             source/build/ios/iphoneos/Runner.app \
-            build-normal/Payload/
+            ipa/Payload/
 
-          cd build-normal
+          # 再保险：如果还有 PlugIns 就删掉
+          rm -rf ipa/Payload/Runner.app/PlugIns
 
-          zip -qry \
-            "../PureLive-${VERSION}-iOS-Unsigned.ipa" \
-            Payload
-
-          cd ..
-
-          echo "✅ 普通 IPA 制作完成"
-
-      # -----------------------------------------------------
-      # 10. 制作 LiveContainer 专用 IPA
-      #
-      # 删除 Pure Live 的 App Extension，
-      # 避免 Guest App 扩展影响 LiveContainer。
-      # -----------------------------------------------------
-      - name: 制作 LiveContainer IPA
-        shell: bash
-        run: |
-          TAG="${{ needs.prepare.outputs.tag }}"
-          VERSION="${TAG#v}"
-
-          echo "=========================================="
-          echo "制作 LiveContainer IPA"
-          echo "版本：$VERSION"
-          echo "=========================================="
-
-          rm -rf build-livecontainer
-          mkdir -p build-livecontainer/Payload
-
-          cp -R \
-            source/build/ios/iphoneos/Runner.app \
-            build-livecontainer/Payload/
-
-          echo "删除 App Extensions..."
-
-          rm -rf \
-            build-livecontainer/Payload/Runner.app/PlugIns
-
-          cd build-livecontainer
+          cd ipa
 
           zip -qry \
             "../PureLive-${VERSION}-iOS-LiveContainer.ipa" \
@@ -273,32 +454,28 @@ jobs:
 
           cd ..
 
-          echo "✅ LiveContainer IPA 制作完成"
+          echo ""
+          echo "✅ IPA 制作完成"
 
       # -----------------------------------------------------
-      # 11. 查看最终 IPA
+      # 15. 查看 IPA
       # -----------------------------------------------------
       - name: 查看生成的 IPA
         shell: bash
         run: |
           echo "=========================================="
-          echo "最终生成的 IPA"
+          echo "生成结果"
           echo "=========================================="
 
-          ls -lh *.ipa
-
-          echo ""
-          echo "✅ Pure Live iOS 打包全部完成"
+          ls -lh PureLive-*.ipa
 
       # -----------------------------------------------------
-      # 12. 上传 IPA
+      # 16. 上传 IPA
       # -----------------------------------------------------
       - name: 上传 IPA
         uses: actions/upload-artifact@v4
         with:
           name: PureLive-iOS-${{ needs.prepare.outputs.tag }}
-          path: |
-            PureLive-*-iOS-Unsigned.ipa
-            PureLive-*-iOS-LiveContainer.ipa
+          path: PureLive-*-iOS-LiveContainer.ipa
           retention-days: 7
           if-no-files-found: error

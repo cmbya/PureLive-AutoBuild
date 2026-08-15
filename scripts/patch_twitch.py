@@ -152,14 +152,14 @@ def main():
     path = source / "lib/modules/toolbox/toolbox_controller.dart"
     text = read(path)
 
-    if "twitch\\\\.tv" not in text:
+    if "twitch\\.tv" not in text:
         old = (
             'RegExp(r"bilibili|huya|douyu|douyin|kuaishou|163")'
             '.hasMatch(text)'
         )
         new = (
             'RegExp('
-            'r"bilibili|huya|douyu|douyin|kuaishou|163|twitch\\\\.tv", '
+            'r"bilibili|huya|douyu|douyin|kuaishou|163|twitch\\.tv", '
             'caseSensitive: false'
             ').hasMatch(text)'
         )

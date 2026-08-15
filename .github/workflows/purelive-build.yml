@@ -156,7 +156,6 @@ jobs:
 
           dart analyze \
             --no-fatal-warnings \
-            --no-fatal-infos \
             lib/core/site/twitch_site.dart \
             lib/core/sites.dart \
             lib/common/utils/live_url_tool.dart \

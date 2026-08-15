@@ -1,0 +1,209 @@
+name: Pure Live Build Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "要编译的版本，填写 latest 或 v2.0.23"
+        required: true
+        default: "latest"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # =========================================================
+  # 1. 获取要编译的 Pure Live 版本
+  # =========================================================
+  prepare:
+    name: 获取 Pure Live 版本
+    runs-on: ubuntu-latest
+
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+
+    steps:
+      - name: 获取版本
+        id: version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          INPUT_VERSION="${{ inputs.version }}"
+
+          if [ "$INPUT_VERSION" = "latest" ]; then
+            TAG=$(gh api repos/liuchuancong/pure_live/releases/latest --jq '.tag_name')
+          else
+            TAG="$INPUT_VERSION"
+          fi
+
+          echo "准备编译版本：$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  # =========================================================
+  # 2. 编译 iOS
+  # =========================================================
+  build-ios:
+    name: 编译 iOS IPA
+    needs: prepare
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: 显示版本
+        run: |
+          echo "Pure Live: ${{ needs.prepare.outputs.tag }}"
+
+      - name: 下载 Pure Live 源码
+        shell: bash
+        run: |
+          git clone \
+            --depth 1 \
+            --branch "${{ needs.prepare.outputs.tag }}" \
+            https://github.com/liuchuancong/pure_live.git \
+            source
+
+      - name: 安装 Flutter 3.38.3
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.38.3"
+          channel: "stable"
+          cache: true
+
+      - name: 查看 Flutter 环境
+        run: |
+          flutter --version
+          flutter doctor -v
+
+      - name: 获取 Flutter 依赖
+        working-directory: source
+        run: flutter pub get
+
+      - name: 编译无签名 iOS
+        working-directory: source
+        run: |
+          flutter build ios \
+            --release \
+            --no-codesign
+
+      - name: 制作普通无签名 IPA
+        shell: bash
+        run: |
+          TAG="${{ needs.prepare.outputs.tag }}"
+          VERSION="${TAG#v}"
+
+          mkdir -p ios-normal/Payload
+          cp -R source/build/ios/iphoneos/Runner.app ios-normal/Payload/
+
+          cd ios-normal
+          zip -qry "../PureLive-${VERSION}-iOS-Unsigned.ipa" Payload
+          cd ..
+
+      - name: 制作 LiveContainer 专用 IPA
+        shell: bash
+        run: |
+          TAG="${{ needs.prepare.outputs.tag }}"
+          VERSION="${TAG#v}"
+
+          mkdir -p ios-livecontainer/Payload
+          cp -R source/build/ios/iphoneos/Runner.app ios-livecontainer/Payload/
+
+          # LiveContainer Guest App 不需要 App Extension
+          rm -rf ios-livecontainer/Payload/Runner.app/PlugIns
+
+          cd ios-livecontainer
+          zip -qry "../PureLive-${VERSION}-iOS-LiveContainer.ipa" Payload
+          cd ..
+
+      - name: 上传 iOS IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: PureLive-iOS-${{ needs.prepare.outputs.tag }}
+          path: |
+            PureLive-*-iOS-Unsigned.ipa
+            PureLive-*-iOS-LiveContainer.ipa
+          retention-days: 7
+
+  # =========================================================
+  # 3. 编译 Windows
+  # =========================================================
+  build-windows:
+    name: 编译 Windows
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 下载 Pure Live 源码
+        shell: pwsh
+        run: |
+          git clone `
+            --depth 1 `
+            --branch "${{ needs.prepare.outputs.tag }}" `
+            https://github.com/liuchuancong/pure_live.git `
+            source
+
+      - name: 安装 Flutter 3.38.3
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.38.3"
+          channel: "stable"
+          cache: true
+
+      - name: 查看 Flutter 环境
+        shell: pwsh
+        run: |
+          flutter --version
+          flutter doctor -v
+
+      - name: 启用 Windows
+        shell: pwsh
+        run: flutter config --enable-windows-desktop
+
+      - name: 获取 Flutter 依赖
+        working-directory: source
+        shell: pwsh
+        run: flutter pub get
+
+      - name: 编译 Windows
+        working-directory: source
+        shell: pwsh
+        run: flutter build windows --release
+
+      - name: 制作 Windows ZIP
+        shell: pwsh
+        run: |
+          $TAG = "${{ needs.prepare.outputs.tag }}"
+          $VERSION = $TAG.TrimStart("v")
+
+          $EXE = Get-ChildItem `
+            "source\build\windows" `
+            -Recurse `
+            -Filter "*.exe" |
+            Where-Object {
+              $_.FullName -match "\\runner\\Release\\"
+            } |
+            Select-Object -First 1
+
+          if (-not $EXE) {
+            Write-Error "找不到 Windows Release 文件"
+            exit 1
+          }
+
+          $RELEASE_DIR = $EXE.Directory.FullName
+
+          Write-Host "Windows Release 目录："
+          Write-Host $RELEASE_DIR
+
+          Compress-Archive `
+            -Path "$RELEASE_DIR\*" `
+            -DestinationPath "PureLive-${VERSION}-Windows-x64.zip" `
+            -Force
+
+      - name: 上传 Windows
+        uses: actions/upload-artifact@v4
+        with:
+          name: PureLive-Windows-${{ needs.prepare.outputs.tag }}
+          path: PureLive-*-Windows-x64.zip
+          retention-days: 7

@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   # =========================================================
-  # 获取 Pure Live 版本
+  # 第一步：获取 Pure Live 要编译的版本
   # =========================================================
   prepare:
     name: 获取 Pure Live 版本
@@ -24,7 +24,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
 
     steps:
-      - name: 获取最新版本
+      - name: 获取版本
         id: version
         shell: bash
         env:
@@ -45,22 +45,51 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
   # =========================================================
-  # 编译 iOS
+  # 第二步：编译 iOS
   # =========================================================
   build-ios:
     name: 编译 iOS IPA
     needs: prepare
-    runs-on: macos-15
+
+    # 这里改为 macOS 26
+    # 主要是为了使用更新的 Xcode / iOS SDK
+    runs-on: macos-26
+
     timeout-minutes: 90
 
     steps:
       # -----------------------------------------------------
-      # 1. 下载源码
+      # 1. 查看 Mac / Xcode / iOS SDK 环境
+      # -----------------------------------------------------
+      - name: 查看 Xcode 和 iOS SDK
+        shell: bash
+        run: |
+          echo "=========================================="
+          echo "macOS"
+          echo "=========================================="
+          sw_vers
+
+          echo ""
+          echo "=========================================="
+          echo "Xcode"
+          echo "=========================================="
+          xcodebuild -version
+
+          echo ""
+          echo "=========================================="
+          echo "iOS SDK"
+          echo "=========================================="
+          xcrun --sdk iphoneos --show-sdk-version
+
+      # -----------------------------------------------------
+      # 2. 下载 Pure Live 官方源码
       # -----------------------------------------------------
       - name: 下载 Pure Live 源码
         shell: bash
         run: |
-          echo "下载版本：${{ needs.prepare.outputs.tag }}"
+          echo "=========================================="
+          echo "下载 Pure Live：${{ needs.prepare.outputs.tag }}"
+          echo "=========================================="
 
           git clone \
             --depth 1 \
@@ -69,49 +98,71 @@ jobs:
             source
 
       # -----------------------------------------------------
-      # 2. 安装 Flutter
-      # 不再固定旧版，直接使用最新 Stable
+      # 3. 安装最新 Flutter Stable
+      # 不再固定之前有问题的旧 Flutter
       # -----------------------------------------------------
-      - name: 安装最新 Flutter Stable
+      - name: 安装 Flutter Stable
         uses: subosito/flutter-action@v2
         with:
           channel: stable
           cache: true
 
       # -----------------------------------------------------
-      # 3. 显示环境
+      # 4. 查看 Flutter / Dart 环境
       # -----------------------------------------------------
       - name: 查看 Flutter 和 Dart 版本
+        shell: bash
         run: |
+          echo "=========================================="
+          echo "Flutter"
+          echo "=========================================="
           flutter --version
+
+          echo ""
+          echo "=========================================="
+          echo "Dart"
+          echo "=========================================="
           dart --version
+
+          echo ""
+          echo "=========================================="
+          echo "Flutter Doctor"
+          echo "=========================================="
           flutter doctor -v
 
       # -----------------------------------------------------
-      # 4. 获取项目依赖
+      # 5. 下载 Pure Live Flutter 依赖
       # -----------------------------------------------------
       - name: 获取 Flutter 依赖
         working-directory: source
+        shell: bash
         run: |
           flutter pub get
 
       # -----------------------------------------------------
-      # 5. 编译 iOS
-      # 不签名，后面自己打包 IPA
+      # 6. 编译 iOS Runner.app
+      #
+      # 不进行苹果官方签名
+      # 编译完成以后自己封装成 IPA
       # -----------------------------------------------------
       - name: 编译无签名 iOS
         working-directory: source
+        shell: bash
         run: |
           flutter build ios \
             --release \
             --no-codesign
 
       # -----------------------------------------------------
-      # 6. 检查 Runner.app
+      # 7. 检查 Runner.app 是否真正生成
       # -----------------------------------------------------
       - name: 检查 iOS 编译结果
         shell: bash
         run: |
+          echo "=========================================="
+          echo "检查 Runner.app"
+          echo "=========================================="
+
           if [ ! -d "source/build/ios/iphoneos/Runner.app" ]; then
             echo "❌ 没有找到 Runner.app"
             exit 1
@@ -119,10 +170,15 @@ jobs:
 
           echo "✅ Runner.app 编译成功"
 
+          echo ""
+          echo "Runner.app 大小："
           du -sh source/build/ios/iphoneos/Runner.app
 
       # -----------------------------------------------------
-      # 7. 制作普通无签名 IPA
+      # 8. 制作普通无签名 IPA
+      #
+      # 这个版本保留 Pure Live 原本的 App Extension
+      # 后面可以用于其他自签方式
       # -----------------------------------------------------
       - name: 制作普通 IPA
         shell: bash
@@ -130,6 +186,12 @@ jobs:
           TAG="${{ needs.prepare.outputs.tag }}"
           VERSION="${TAG#v}"
 
+          echo "=========================================="
+          echo "制作普通 IPA"
+          echo "版本：$VERSION"
+          echo "=========================================="
+
+          rm -rf build-normal
           mkdir -p build-normal/Payload
 
           cp -R \
@@ -147,7 +209,11 @@ jobs:
           echo "✅ 普通 IPA 制作完成"
 
       # -----------------------------------------------------
-      # 8. 制作 LiveContainer 专用 IPA
+      # 9. 制作 LiveContainer 专用 IPA
+      #
+      # Pure Live 自带 ShareExtension。
+      # LiveContainer Guest App 不需要这个扩展，
+      # 所以这里自动删除 PlugIns。
       # -----------------------------------------------------
       - name: 制作 LiveContainer IPA
         shell: bash
@@ -155,14 +221,20 @@ jobs:
           TAG="${{ needs.prepare.outputs.tag }}"
           VERSION="${TAG#v}"
 
+          echo "=========================================="
+          echo "制作 LiveContainer IPA"
+          echo "版本：$VERSION"
+          echo "=========================================="
+
+          rm -rf build-livecontainer
           mkdir -p build-livecontainer/Payload
 
           cp -R \
             source/build/ios/iphoneos/Runner.app \
             build-livecontainer/Payload/
 
-          # 删除 App Extension
-          # LiveContainer Guest App 暂时不需要它
+          echo "删除 App Extensions..."
+
           rm -rf \
             build-livecontainer/Payload/Runner.app/PlugIns
 
@@ -177,19 +249,22 @@ jobs:
           echo "✅ LiveContainer IPA 制作完成"
 
       # -----------------------------------------------------
-      # 9. 显示 IPA
+      # 10. 显示最终生成的 IPA
       # -----------------------------------------------------
-      - name: 查看 IPA 文件
+      - name: 查看生成的 IPA
         shell: bash
         run: |
           echo "=========================================="
-          echo "生成的 IPA："
+          echo "最终生成的 IPA"
           echo "=========================================="
 
           ls -lh *.ipa
 
+          echo ""
+          echo "✅ iOS 打包全部完成"
+
       # -----------------------------------------------------
-      # 10. 上传
+      # 11. 上传到 GitHub Actions
       # -----------------------------------------------------
       - name: 上传 IPA
         uses: actions/upload-artifact@v4

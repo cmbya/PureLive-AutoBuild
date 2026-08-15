@@ -1,4 +1,4 @@
-name: Pure Live Build Test
+name: Build Pure Live iOS
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   # =========================================================
-  # 1. 获取要编译的 Pure Live 版本
+  # 获取 Pure Live 版本
   # =========================================================
   prepare:
     name: 获取 Pure Live 版本
@@ -24,7 +24,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
 
     steps:
-      - name: 获取版本
+      - name: 获取最新版本
         id: version
         shell: bash
         env:
@@ -38,48 +38,67 @@ jobs:
             TAG="$INPUT_VERSION"
           fi
 
-          echo "准备编译版本：$TAG"
+          echo "=========================================="
+          echo "准备编译 Pure Live：$TAG"
+          echo "=========================================="
+
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
   # =========================================================
-  # 2. 编译 iOS
+  # 编译 iOS
   # =========================================================
   build-ios:
     name: 编译 iOS IPA
     needs: prepare
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
-      - name: 显示版本
-        run: |
-          echo "Pure Live: ${{ needs.prepare.outputs.tag }}"
-
+      # -----------------------------------------------------
+      # 1. 下载源码
+      # -----------------------------------------------------
       - name: 下载 Pure Live 源码
         shell: bash
         run: |
+          echo "下载版本：${{ needs.prepare.outputs.tag }}"
+
           git clone \
             --depth 1 \
             --branch "${{ needs.prepare.outputs.tag }}" \
             https://github.com/liuchuancong/pure_live.git \
             source
 
-      - name: 安装 Flutter 3.38.3
+      # -----------------------------------------------------
+      # 2. 安装 Flutter
+      # 不再固定旧版，直接使用最新 Stable
+      # -----------------------------------------------------
+      - name: 安装最新 Flutter Stable
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.38.3"
-          channel: "stable"
+          channel: stable
           cache: true
 
-      - name: 查看 Flutter 环境
+      # -----------------------------------------------------
+      # 3. 显示环境
+      # -----------------------------------------------------
+      - name: 查看 Flutter 和 Dart 版本
         run: |
           flutter --version
+          dart --version
           flutter doctor -v
 
+      # -----------------------------------------------------
+      # 4. 获取项目依赖
+      # -----------------------------------------------------
       - name: 获取 Flutter 依赖
         working-directory: source
-        run: flutter pub get
+        run: |
+          flutter pub get
 
+      # -----------------------------------------------------
+      # 5. 编译 iOS
+      # 不签名，后面自己打包 IPA
+      # -----------------------------------------------------
       - name: 编译无签名 iOS
         working-directory: source
         run: |
@@ -87,36 +106,92 @@ jobs:
             --release \
             --no-codesign
 
-      - name: 制作普通无签名 IPA
+      # -----------------------------------------------------
+      # 6. 检查 Runner.app
+      # -----------------------------------------------------
+      - name: 检查 iOS 编译结果
+        shell: bash
+        run: |
+          if [ ! -d "source/build/ios/iphoneos/Runner.app" ]; then
+            echo "❌ 没有找到 Runner.app"
+            exit 1
+          fi
+
+          echo "✅ Runner.app 编译成功"
+
+          du -sh source/build/ios/iphoneos/Runner.app
+
+      # -----------------------------------------------------
+      # 7. 制作普通无签名 IPA
+      # -----------------------------------------------------
+      - name: 制作普通 IPA
         shell: bash
         run: |
           TAG="${{ needs.prepare.outputs.tag }}"
           VERSION="${TAG#v}"
 
-          mkdir -p ios-normal/Payload
-          cp -R source/build/ios/iphoneos/Runner.app ios-normal/Payload/
+          mkdir -p build-normal/Payload
 
-          cd ios-normal
-          zip -qry "../PureLive-${VERSION}-iOS-Unsigned.ipa" Payload
+          cp -R \
+            source/build/ios/iphoneos/Runner.app \
+            build-normal/Payload/
+
+          cd build-normal
+
+          zip -qry \
+            "../PureLive-${VERSION}-iOS-Unsigned.ipa" \
+            Payload
+
           cd ..
 
-      - name: 制作 LiveContainer 专用 IPA
+          echo "✅ 普通 IPA 制作完成"
+
+      # -----------------------------------------------------
+      # 8. 制作 LiveContainer 专用 IPA
+      # -----------------------------------------------------
+      - name: 制作 LiveContainer IPA
         shell: bash
         run: |
           TAG="${{ needs.prepare.outputs.tag }}"
           VERSION="${TAG#v}"
 
-          mkdir -p ios-livecontainer/Payload
-          cp -R source/build/ios/iphoneos/Runner.app ios-livecontainer/Payload/
+          mkdir -p build-livecontainer/Payload
 
-          # LiveContainer Guest App 不需要 App Extension
-          rm -rf ios-livecontainer/Payload/Runner.app/PlugIns
+          cp -R \
+            source/build/ios/iphoneos/Runner.app \
+            build-livecontainer/Payload/
 
-          cd ios-livecontainer
-          zip -qry "../PureLive-${VERSION}-iOS-LiveContainer.ipa" Payload
+          # 删除 App Extension
+          # LiveContainer Guest App 暂时不需要它
+          rm -rf \
+            build-livecontainer/Payload/Runner.app/PlugIns
+
+          cd build-livecontainer
+
+          zip -qry \
+            "../PureLive-${VERSION}-iOS-LiveContainer.ipa" \
+            Payload
+
           cd ..
 
-      - name: 上传 iOS IPA
+          echo "✅ LiveContainer IPA 制作完成"
+
+      # -----------------------------------------------------
+      # 9. 显示 IPA
+      # -----------------------------------------------------
+      - name: 查看 IPA 文件
+        shell: bash
+        run: |
+          echo "=========================================="
+          echo "生成的 IPA："
+          echo "=========================================="
+
+          ls -lh *.ipa
+
+      # -----------------------------------------------------
+      # 10. 上传
+      # -----------------------------------------------------
+      - name: 上传 IPA
         uses: actions/upload-artifact@v4
         with:
           name: PureLive-iOS-${{ needs.prepare.outputs.tag }}
@@ -124,86 +199,4 @@ jobs:
             PureLive-*-iOS-Unsigned.ipa
             PureLive-*-iOS-LiveContainer.ipa
           retention-days: 7
-
-  # =========================================================
-  # 3. 编译 Windows
-  # =========================================================
-  build-windows:
-    name: 编译 Windows
-    needs: prepare
-    runs-on: windows-latest
-    timeout-minutes: 60
-
-    steps:
-      - name: 下载 Pure Live 源码
-        shell: pwsh
-        run: |
-          git clone `
-            --depth 1 `
-            --branch "${{ needs.prepare.outputs.tag }}" `
-            https://github.com/liuchuancong/pure_live.git `
-            source
-
-      - name: 安装 Flutter 3.38.3
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: "3.38.3"
-          channel: "stable"
-          cache: true
-
-      - name: 查看 Flutter 环境
-        shell: pwsh
-        run: |
-          flutter --version
-          flutter doctor -v
-
-      - name: 启用 Windows
-        shell: pwsh
-        run: flutter config --enable-windows-desktop
-
-      - name: 获取 Flutter 依赖
-        working-directory: source
-        shell: pwsh
-        run: flutter pub get
-
-      - name: 编译 Windows
-        working-directory: source
-        shell: pwsh
-        run: flutter build windows --release
-
-      - name: 制作 Windows ZIP
-        shell: pwsh
-        run: |
-          $TAG = "${{ needs.prepare.outputs.tag }}"
-          $VERSION = $TAG.TrimStart("v")
-
-          $EXE = Get-ChildItem `
-            "source\build\windows" `
-            -Recurse `
-            -Filter "*.exe" |
-            Where-Object {
-              $_.FullName -match "\\runner\\Release\\"
-            } |
-            Select-Object -First 1
-
-          if (-not $EXE) {
-            Write-Error "找不到 Windows Release 文件"
-            exit 1
-          }
-
-          $RELEASE_DIR = $EXE.Directory.FullName
-
-          Write-Host "Windows Release 目录："
-          Write-Host $RELEASE_DIR
-
-          Compress-Archive `
-            -Path "$RELEASE_DIR\*" `
-            -DestinationPath "PureLive-${VERSION}-Windows-x64.zip" `
-            -Force
-
-      - name: 上传 Windows
-        uses: actions/upload-artifact@v4
-        with:
-          name: PureLive-Windows-${{ needs.prepare.outputs.tag }}
-          path: PureLive-*-Windows-x64.zip
-          retention-days: 7
+          if-no-files-found: error

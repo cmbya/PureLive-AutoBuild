@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "要编译的版本，填写 latest 或 v2.0.23"
+        description: "Pure Live 版本，例如 latest 或 v2.0.23"
         required: true
         default: "latest"
         type: string
@@ -13,9 +13,6 @@ permissions:
   contents: read
 
 jobs:
-  # =========================================================
-  # 1. 获取 Pure Live 版本
-  # =========================================================
   prepare:
     name: 获取 Pure Live 版本
     runs-on: ubuntu-latest
@@ -24,7 +21,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
 
     steps:
-      - name: 获取 Pure Live 版本
+      - name: 获取版本
         id: version
         shell: bash
         env:
@@ -38,174 +35,49 @@ jobs:
             TAG="$INPUT_VERSION"
           fi
 
-          echo "=========================================="
-          echo "准备编译 Pure Live：$TAG"
-          echo "=========================================="
-
+          echo "Pure Live：$TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-  # =========================================================
-  # 2. 编译 iOS
-  # =========================================================
+
   build-ios:
-    name: 编译 iOS IPA
+    name: 编译 Pure Live iOS
     needs: prepare
     runs-on: macos-26
     timeout-minutes: 120
 
     steps:
-      # -----------------------------------------------------
-      # 1. 查看编译环境
-      # -----------------------------------------------------
-      - name: 查看 Xcode 和 iOS SDK
+
+      # =====================================================
+      # 下载源码
+      # =====================================================
+
+      - name: 下载 Pure Live
         shell: bash
         run: |
-          echo "========== macOS =========="
-          sw_vers
-
-          echo ""
-          echo "========== Xcode =========="
-          xcodebuild -version
-
-          echo ""
-          echo "========== iOS SDK =========="
-          xcrun --sdk iphoneos --show-sdk-version
-
-      # -----------------------------------------------------
-      # 2. 下载 Pure Live
-      # -----------------------------------------------------
-      - name: 下载 Pure Live 源码
-        shell: bash
-        run: |
-          echo "=========================================="
-          echo "下载 Pure Live：${{ needs.prepare.outputs.tag }}"
-          echo "=========================================="
-
           git clone \
             --depth 1 \
             --branch "${{ needs.prepare.outputs.tag }}" \
             https://github.com/liuchuancong/pure_live.git \
             source
 
-      # -----------------------------------------------------
-      # 3. 固定 file_picker
-      # -----------------------------------------------------
-      - name: 固定 file_picker 兼容版本
-        shell: bash
-        run: |
-          echo "=========================================="
-          echo "修复 file_picker"
-          echo "=========================================="
+          echo "======================================"
+          echo "Pure Live：${{ needs.prepare.outputs.tag }}"
+          echo "======================================"
 
-          python3 <<'PY'
-          from pathlib import Path
 
-          path = Path("source/pubspec.yaml")
-          text = path.read_text(encoding="utf-8")
+      # =====================================================
+      # Flutter
+      # =====================================================
 
-          old = "file_picker: ^12.0.0-beta.5"
-          new = "file_picker: 12.0.0-beta.5"
-
-          if old in text:
-              text = text.replace(old, new)
-              path.write_text(text, encoding="utf-8")
-              print("✅ 已固定 file_picker 12.0.0-beta.5")
-          elif new in text:
-              print("✅ file_picker 已经固定")
-          else:
-              print("ℹ️ 上游 file_picker 已改变，不修改")
-          PY
-
-          grep -n "file_picker:" source/pubspec.yaml || true
-
-      # -----------------------------------------------------
-      # 4. 从 Podfile 删除 ShareExtension
-      #
-      # 这是这次新增的关键修复
-      # -----------------------------------------------------
-      - name: 从 Podfile 移除 ShareExtension
-        shell: bash
-        run: |
-          echo "=========================================="
-          echo "修改 ios/Podfile"
-          echo "=========================================="
-
-          echo ""
-          echo "修改前："
-          cat source/ios/Podfile
-
-          python3 <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path("source/ios/Podfile")
-          text = path.read_text(encoding="utf-8")
-
-          original = text
-
-          # Pure Live v2.0.23 当前结构：
-          #
-          # # share_handler addition start
-          # target 'ShareExtension' do
-          #   inherit! :search_paths
-          #   pod "share_handler_ios_models", ...
-          # end
-          # # share_handler addition end
-
-          text = re.sub(
-              r'\n\s*# share_handler addition start'
-              r'.*?'
-              r'# share_handler addition end\s*',
-              '\n',
-              text,
-              flags=re.S
-          )
-
-          # 备用处理
-          # 如果未来作者删掉了上面的注释，
-          # 继续尝试直接删除 ShareExtension target
-          text = re.sub(
-              r"\n\s*target 'ShareExtension' do"
-              r".*?"
-              r"\n\s*end\s*",
-              '\n',
-              text,
-              flags=re.S
-          )
-
-          path.write_text(text, encoding="utf-8")
-
-          if text != original:
-              print("✅ 已从 Podfile 移除 ShareExtension")
-          else:
-              print("ℹ️ Podfile 中没有找到 ShareExtension")
-
-          if "target 'ShareExtension'" in text:
-              raise SystemExit(
-                  "❌ Podfile 仍然存在 ShareExtension"
-              )
-          PY
-
-          echo ""
-          echo "=========================================="
-          echo "修改后的 Podfile"
-          echo "=========================================="
-
-          cat source/ios/Podfile
-
-      # -----------------------------------------------------
-      # 5. 安装 Flutter
-      # -----------------------------------------------------
-      - name: 安装 Flutter Stable
+      - name: 安装 Flutter 3.47.0
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: "3.47.0"
           channel: stable
           cache: true
 
-      # -----------------------------------------------------
-      # 6. 查看 Flutter / Dart
-      # -----------------------------------------------------
-      - name: 查看 Flutter 和 Dart
+
+      - name: 查看编译环境
         shell: bash
         run: |
           echo "========== Flutter =========="
@@ -216,54 +88,376 @@ jobs:
           dart --version
 
           echo ""
-          flutter doctor -v
-
-      # -----------------------------------------------------
-      # 7. 获取 Flutter 依赖
-      # -----------------------------------------------------
-      - name: 获取 Flutter 依赖
-        working-directory: source
-        shell: bash
-        run: |
-          flutter clean
-          flutter pub get
+          echo "========== Xcode =========="
+          xcodebuild -version
 
           echo ""
-          echo "========== file_picker =========="
-          flutter pub deps | grep -E "file_picker|file_picker_platform" || true
+          echo "========== iOS SDK =========="
+          xcrun --sdk iphoneos --show-sdk-version
 
-      # -----------------------------------------------------
-      # 8. 从 Runner 构建链断开 ShareExtension
+
+      # =====================================================
+      # 关闭 Swift Package Manager
       #
-      # 不删除 ShareExtension Target 本身
-      # 只删除：
-      #
-      # Runner → ShareExtension dependency
-      # Embed Foundation Extensions
-      # -----------------------------------------------------
-      - name: 禁用 ShareExtension 构建
+      # Pure Live 当前大量插件仍依赖 CocoaPods。
+      # 为了避免 SPM + CocoaPods 混合构建，强制只使用 Pods。
+      # =====================================================
+
+      - name: 关闭 Swift Package Manager
         shell: bash
         run: |
-          echo "=========================================="
-          echo "禁用 ShareExtension"
-          echo "=========================================="
+          flutter config --no-enable-swift-package-manager
+
+
+      # =====================================================
+      # 创建专门的 iOS 主程序版本
+      # =====================================================
+
+      - name: 修复 Pure Live iOS 源码
+        shell: bash
+        run: |
 
           python3 <<'PY'
           from pathlib import Path
           import re
 
-          path = Path(
-              "source/ios/Runner.xcodeproj/project.pbxproj"
+          print("======================================")
+          print("开始制作 Pure Live iOS 主程序版")
+          print("======================================")
+
+          # ==================================================
+          # 1. pubspec.yaml
+          # ==================================================
+
+          pubspec = Path("source/pubspec.yaml")
+
+          text = pubspec.read_text(encoding="utf-8")
+
+
+          # --------------------------------------------------
+          # file_picker
+          #
+          # Pure Live v2.0.23 使用旧 FilePickerResult API，
+          # 所以必须锁 beta.5。
+          # --------------------------------------------------
+
+          old = "file_picker: ^12.0.0-beta.5"
+          new = "file_picker: 12.0.0-beta.5"
+
+          if old in text:
+              text = text.replace(old, new)
+
+              print(
+                  "✅ file_picker 固定为 12.0.0-beta.5"
+              )
+
+          elif new in text:
+
+              print(
+                  "✅ file_picker 已经固定"
+              )
+
+          else:
+
+              print(
+                  "ℹ️ 上游 file_picker 已发生变化"
+              )
+
+
+          # --------------------------------------------------
+          # 删除 share_handler
+          #
+          # Pure Live 当前只有 Android 使用它。
+          # iOS 不需要加载 share_handler_ios。
+          # --------------------------------------------------
+
+          new_text = re.sub(
+              r'(?m)^\s{2}share_handler:\s*[^\n]+\n',
+              '',
+              text
           )
 
-          text = path.read_text(encoding="utf-8")
+          if new_text != text:
+
+              print(
+                  "✅ 已从 pubspec 删除 share_handler"
+              )
+
+          else:
+
+              print(
+                  "ℹ️ pubspec 中没有 share_handler"
+              )
+
+          text = new_text
+
 
           # --------------------------------------------------
-          # 找 Embed Foundation Extensions Build Phase
+          # 强制这个项目关闭 SwiftPM
           # --------------------------------------------------
+
+          if (
+              "enable-swift-package-manager: false"
+              not in text
+          ):
+
+              marker = (
+                  "flutter:\n"
+                  "  uses-material-design: true"
+              )
+
+              replacement = (
+                  "flutter:\n"
+                  "  config:\n"
+                  "    enable-swift-package-manager: false\n"
+                  "  uses-material-design: true"
+              )
+
+              if marker in text:
+
+                  text = text.replace(
+                      marker,
+                      replacement
+                  )
+
+                  print(
+                      "✅ pubspec 已关闭 SwiftPM"
+                  )
+
+
+          pubspec.write_text(
+              text,
+              encoding="utf-8"
+          )
+
+
+          # ==================================================
+          # 2. common/index.dart
+          #
+          # 删除 share_handler 的全局 export
+          # ==================================================
+
+          index_file = Path(
+              "source/lib/common/index.dart"
+          )
+
+          text = index_file.read_text(
+              encoding="utf-8"
+          )
+
+          old = (
+              "export "
+              "'package:share_handler/share_handler.dart';\n"
+          )
+
+          if old in text:
+
+              text = text.replace(
+                  old,
+                  ''
+              )
+
+              print(
+                  "✅ 已删除 share_handler Dart export"
+              )
+
+          index_file.write_text(
+              text,
+              encoding="utf-8"
+          )
+
+
+          # ==================================================
+          # 3. main.dart
+          #
+          # Pure Live 的 ShareHandler 本来就只有 Android 使用。
+          # iOS 构建直接删除监听。
+          # ==================================================
+
+          main_file = Path(
+              "source/lib/main.dart"
+          )
+
+          text = main_file.read_text(
+              encoding="utf-8"
+          )
+
+
+          # 删除 initState 中的调用
+
+          text = re.sub(
+              r'^\s*initSharedMediaListener\(\);\s*\n',
+              '',
+              text,
+              flags=re.M
+          )
+
+
+          # 删除完整方法
+          start_token = (
+              "Future<void> "
+              "initSharedMediaListener() async {"
+          )
+
+          start = text.find(start_token)
+
+          if start != -1:
+
+              # 找到这一行真正开始位置
+              line_start = text.rfind(
+                  '\n',
+                  0,
+                  start
+              ) + 1
+
+              brace_start = text.find(
+                  '{',
+                  start
+              )
+
+              depth = 0
+              end = None
+
+              for i in range(
+                  brace_start,
+                  len(text)
+              ):
+
+                  if text[i] == '{':
+                      depth += 1
+
+                  elif text[i] == '}':
+                      depth -= 1
+
+                      if depth == 0:
+                          end = i + 1
+                          break
+
+              if end is None:
+                  raise SystemExit(
+                      "❌ 无法识别 "
+                      "initSharedMediaListener 方法"
+                  )
+
+              # 删除后面的换行
+              while (
+                  end < len(text)
+                  and text[end] == '\n'
+              ):
+                  end += 1
+
+              text = (
+                  text[:line_start]
+                  + text[end:]
+              )
+
+              print(
+                  "✅ 已删除 Android ShareHandler 监听"
+              )
+
+          else:
+
+              print(
+                  "ℹ️ main.dart 中没有 "
+                  "initSharedMediaListener"
+              )
+
+
+          main_file.write_text(
+              text,
+              encoding="utf-8"
+          )
+
+
+          # ==================================================
+          # 4. Podfile
+          #
+          # share_handler 已经不存在，
+          # ShareExtension Pods 也完全不要。
+          # ==================================================
+
+          podfile = Path(
+              "source/ios/Podfile"
+          )
+
+          text = podfile.read_text(
+              encoding="utf-8"
+          )
+
+
+          # 首选：按照作者留下的注释整体删除
+
+          text = re.sub(
+              r'\n\s*'
+              r'# share_handler addition start'
+              r'.*?'
+              r'# share_handler addition end'
+              r'\s*',
+              '\n',
+              text,
+              flags=re.S
+          )
+
+
+          # 备用：直接删除 ShareExtension Target
+
+          text = re.sub(
+              r"\n\s*target 'ShareExtension' do"
+              r".*?"
+              r"\n\s*end\s*",
+              '\n',
+              text,
+              flags=re.S
+          )
+
+
+          podfile.write_text(
+              text,
+              encoding="utf-8"
+          )
+
+          if "target 'ShareExtension'" in text:
+
+              raise SystemExit(
+                  "❌ Podfile 仍然存在 ShareExtension"
+              )
+
+          print(
+              "✅ Podfile 已删除 ShareExtension"
+          )
+
+
+          # ==================================================
+          # 5. Runner Xcode 工程
+          #
+          # 不删除整个 Target。
+          #
+          # 只切断：
+          #
+          # Runner
+          #  ├─ Embed Foundation Extensions
+          #  └─ ShareExtension Dependency
+          #
+          # Runner.xcscheme 本身只编译 Runner.app。
+          # ==================================================
+
+          project = Path(
+              "source/ios/"
+              "Runner.xcodeproj/"
+              "project.pbxproj"
+          )
+
+          text = project.read_text(
+              encoding="utf-8"
+          )
+
+
+          # 找 Embed Foundation Extensions ID
+
           phase_match = re.search(
               r'([A-F0-9]{24}) '
-              r'/\* Embed Foundation Extensions \*/ = \{',
+              r'/\* Embed Foundation Extensions \*/'
+              r' = \{',
               text
           )
 
@@ -273,264 +467,385 @@ jobs:
               else None
           )
 
-          if phase_id:
-              print(
-                  "✅ 找到 Embed Foundation Extensions："
-                  + phase_id
-              )
-          else:
-              print(
-                  "ℹ️ 没找到 Embed Foundation Extensions"
-              )
 
-          # --------------------------------------------------
-          # 找 ShareExtension Target Dependency
-          # --------------------------------------------------
+          # 找 ShareExtension Dependency ID
+
           dep_id = None
 
-          pattern = re.compile(
+          dep_pattern = re.compile(
               r'([A-F0-9]{24}) '
-              r'/\* PBXTargetDependency \*/ = \{'
+              r'/\* PBXTargetDependency \*/'
+              r' = \{'
               r'(.*?)'
               r'\n\s*\};',
               re.S
           )
 
-          for match in pattern.finditer(text):
+          for match in dep_pattern.finditer(
+              text
+          ):
+
               body = match.group(2)
 
-              if "/* ShareExtension */" in body:
+              if (
+                  "ShareExtension"
+                  in body
+              ):
+
                   dep_id = match.group(1)
                   break
 
-          if dep_id:
-              print(
-                  "✅ 找到 ShareExtension Dependency："
-                  + dep_id
-              )
-          else:
-              print(
-                  "ℹ️ 没找到 ShareExtension Dependency"
-              )
 
-          # --------------------------------------------------
-          # 找 Runner Target
-          # --------------------------------------------------
+          # 找 Runner PBXNativeTarget
+
           runner_pattern = re.compile(
-              r'([A-F0-9]{24}) /\* Runner \*/ = \{'
+              r'([A-F0-9]{24}) '
+              r'/\* Runner \*/ = \{'
               r'\n\s*isa = PBXNativeTarget;'
               r'.*?'
               r'\n\s*\};',
               re.S
           )
 
-          runner_match = runner_pattern.search(text)
+          runner_match = (
+              runner_pattern.search(text)
+          )
 
           if not runner_match:
+
               raise SystemExit(
                   "❌ 找不到 Runner Target"
               )
 
-          runner_block = runner_match.group(0)
 
-          print("✅ 找到 Runner Target")
+          runner = runner_match.group(0)
 
-          original_runner = runner_block
 
-          # --------------------------------------------------
-          # Runner buildPhases 中删除扩展 Embed Phase
-          # --------------------------------------------------
+          # 删除 Embed Foundation Extensions 引用
+
           if phase_id:
-              runner_block = re.sub(
-                  rf'^\s*{re.escape(phase_id)} '
-                  rf'/\* Embed Foundation Extensions \*/,\s*\n',
+
+              runner = re.sub(
+                  rf'^\s*'
+                  rf'{re.escape(phase_id)} '
+                  rf'/\* Embed Foundation Extensions \*/,'
+                  rf'\s*\n',
                   '',
-                  runner_block,
+                  runner,
                   flags=re.M
               )
 
-          # --------------------------------------------------
-          # Runner dependencies 中删除 ShareExtension
-          # --------------------------------------------------
+              print(
+                  "✅ 已断开 "
+                  "Embed Foundation Extensions"
+              )
+
+
+          # 删除 Runner → ShareExtension dependency
+
           if dep_id:
-              runner_block = re.sub(
-                  rf'^\s*{re.escape(dep_id)} '
-                  rf'/\* PBXTargetDependency \*/,\s*\n',
+
+              runner = re.sub(
+                  rf'^\s*'
+                  rf'{re.escape(dep_id)} '
+                  rf'/\* PBXTargetDependency \*/,'
+                  rf'\s*\n',
                   '',
-                  runner_block,
+                  runner,
                   flags=re.M
               )
 
-          if runner_block != original_runner:
               print(
-                  "✅ 已断开 Runner 和 ShareExtension"
-              )
-          else:
-              print(
-                  "ℹ️ Runner 已经没有 ShareExtension 引用"
+                  "✅ 已断开 "
+                  "Runner → ShareExtension"
               )
 
-          # --------------------------------------------------
-          # 写回文件
-          # --------------------------------------------------
+
           text = (
               text[:runner_match.start()]
-              + runner_block
+              + runner
               + text[runner_match.end():]
           )
 
-          path.write_text(
+          project.write_text(
               text,
               encoding="utf-8"
           )
 
-          # --------------------------------------------------
-          # 验证
-          # --------------------------------------------------
-          check_text = path.read_text(
+
+          # ==================================================
+          # 6. 清空 Runner App Group entitlement
+          #
+          # 当前 App Group 只是 ShareExtension 使用。
+          # LiveContainer 也不需要。
+          # ==================================================
+
+          entitlements = Path(
+              "source/ios/Runner/"
+              "Runner.entitlements"
+          )
+
+          entitlements.write_text(
+              """<?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+          </dict>
+          </plist>
+          """,
               encoding="utf-8"
           )
 
-          check_runner = runner_pattern.search(
-              check_text
+          print(
+              "✅ 已清空 ShareExtension App Group"
           )
 
-          if not check_runner:
-              raise SystemExit(
-                  "❌ 修改后 Runner 无法识别"
+
+          # ==================================================
+          # 最终验证
+          # ==================================================
+
+          pub = pubspec.read_text(
+              encoding="utf-8"
+          )
+
+          idx = index_file.read_text(
+              encoding="utf-8"
+          )
+
+          main = main_file.read_text(
+              encoding="utf-8"
+          )
+
+          pod = podfile.read_text(
+              encoding="utf-8"
+          )
+
+          errors = []
+
+
+          if re.search(
+              r'(?m)^\s{2}share_handler:',
+              pub
+          ):
+              errors.append(
+                  "pubspec 仍存在 share_handler"
               )
 
-          check_block = check_runner.group(0)
 
-          if phase_id and phase_id in check_block:
-              raise SystemExit(
-                  "❌ Embed Foundation Extensions "
-                  "仍然挂在 Runner"
+          if (
+              "package:share_handler/"
+              in idx
+          ):
+              errors.append(
+                  "common/index.dart "
+                  "仍引用 share_handler"
               )
 
-          if dep_id and dep_id in check_block:
-              raise SystemExit(
-                  "❌ ShareExtension Dependency "
-                  "仍然挂在 Runner"
+
+          if (
+              "ShareHandler.instance"
+              in main
+          ):
+              errors.append(
+                  "main.dart "
+                  "仍存在 ShareHandler"
               )
+
+
+          if (
+              "target 'ShareExtension'"
+              in pod
+          ):
+              errors.append(
+                  "Podfile "
+                  "仍存在 ShareExtension"
+              )
+
+
+          if errors:
+
+              for error in errors:
+                  print(
+                      "❌ " + error
+                  )
+
+              raise SystemExit(
+                  "iOS 源码修复验证失败"
+              )
+
 
           print("")
-          print("==========================================")
-          print("✅ Runner 已与 ShareExtension 完全断开")
-          print("==========================================")
+          print(
+              "======================================"
+          )
+          print(
+              "✅ Pure Live iOS 主程序版准备完成"
+          )
+          print(
+              "======================================"
+          )
+
           PY
 
-      # -----------------------------------------------------
-      # 9. 最终检查
-      # -----------------------------------------------------
-      - name: 检查 ShareExtension 配置
+
+      # =====================================================
+      # 清理所有旧生成物
+      # =====================================================
+
+      - name: 清理 iOS 构建缓存
         shell: bash
         run: |
-          echo "=========================================="
-          echo "检查 Podfile"
-          echo "=========================================="
+          cd source
 
-          if grep -q "target 'ShareExtension'" \
-            source/ios/Podfile; then
+          rm -rf .dart_tool
+          rm -rf build
 
-            echo "❌ Podfile 仍存在 ShareExtension"
+          rm -rf ios/Pods
+          rm -rf ios/.symlinks
+          rm -f ios/Podfile.lock
+
+          flutter clean
+
+
+      # =====================================================
+      # 获取依赖
+      # =====================================================
+
+      - name: 获取 Flutter 依赖
+        working-directory: source
+        shell: bash
+        run: |
+          flutter pub get
+
+          echo ""
+          echo "======================================"
+          echo "检查依赖"
+          echo "======================================"
+
+          echo ""
+          echo "file_picker："
+
+          flutter pub deps |
+            grep "file_picker" ||
+            true
+
+          echo ""
+          echo "share_handler："
+
+          if flutter pub deps |
+             grep -q "share_handler"; then
+
+            echo "❌ share_handler 仍存在"
+            flutter pub deps |
+              grep "share_handler"
+
             exit 1
 
           else
 
-            echo "✅ Podfile 已没有 ShareExtension"
+            echo "✅ iOS 依赖中已无 share_handler"
 
           fi
 
-          echo ""
-          echo "=========================================="
-          echo "检查 Xcode 工程"
-          echo "=========================================="
 
+      # =====================================================
+      # CocoaPods
+      # =====================================================
+
+      - name: 安装 CocoaPods
+        working-directory: source/ios
+        shell: bash
+        run: |
+          echo "CocoaPods："
+          pod --version
+
+          echo ""
+          echo "开始 pod install..."
+
+          pod install --repo-update
+
+          echo ""
+          echo "✅ CocoaPods 安装完成"
+
+
+      # =====================================================
+      # 检查 Xcode 工程
+      # =====================================================
+
+      - name: 检查 Xcode 工程
+        shell: bash
+        run: |
           xcodebuild \
             -project source/ios/Runner.xcodeproj \
             -list
 
           echo ""
-          echo "✅ Xcode 工程可以正常读取"
+          echo "✅ Xcode 工程可正常读取"
 
-      # -----------------------------------------------------
-      # 10. 删除旧 Pods
-      #
-      # 让 Flutter 后面重新生成干净的 Runner Pods
-      # -----------------------------------------------------
-      - name: 清理旧 iOS Pods
-        shell: bash
-        run: |
-          echo "=========================================="
-          echo "清理 Pods"
-          echo "=========================================="
 
-          rm -rf source/ios/Pods
-          rm -f source/ios/Podfile.lock
+      # =====================================================
+      # 编译
+      # =====================================================
 
-          echo "✅ Pods 已清理"
-
-      # -----------------------------------------------------
-      # 11. 编译 iOS
-      # -----------------------------------------------------
       - name: 编译无签名 iOS
         working-directory: source
         shell: bash
         run: |
-          echo "=========================================="
-          echo "开始编译 Pure Live iOS"
-          echo "=========================================="
+          echo "======================================"
+          echo "开始编译 Pure Live iOS 主程序"
+          echo "======================================"
 
           flutter build ios \
             --release \
-            --no-codesign
+            --no-codesign \
+            --no-pub
 
-      # -----------------------------------------------------
-      # 12. 检查 Runner.app
-      # -----------------------------------------------------
-      - name: 检查 iOS 编译结果
+
+      # =====================================================
+      # 检查结果
+      # =====================================================
+
+      - name: 检查 Runner.app
         shell: bash
         run: |
           APP="source/build/ios/iphoneos/Runner.app"
 
-          echo "=========================================="
-          echo "检查 Runner.app"
-          echo "=========================================="
-
           if [ ! -d "$APP" ]; then
-            echo "❌ 没有找到 Runner.app"
+
+            echo "❌ Runner.app 不存在"
             exit 1
+
           fi
 
+          echo "======================================"
           echo "✅ Runner.app 编译成功"
+          echo "======================================"
 
-          echo ""
-          echo "App 大小："
           du -sh "$APP"
 
           echo ""
-          echo "检查 PlugIns："
 
           if [ -d "$APP/PlugIns" ]; then
+
+            echo "发现 PlugIns："
             ls -la "$APP/PlugIns"
+
           else
+
             echo "✅ 没有 ShareExtension"
           fi
 
-      # -----------------------------------------------------
-      # 13. 制作 LiveContainer IPA
-      # -----------------------------------------------------
+
+      # =====================================================
+      # 制作 LiveContainer IPA
+      # =====================================================
+
       - name: 制作 IPA
         shell: bash
         run: |
           TAG="${{ needs.prepare.outputs.tag }}"
           VERSION="${TAG#v}"
-
-          echo "=========================================="
-          echo "制作 Pure Live IPA"
-          echo "版本：$VERSION"
-          echo "=========================================="
 
           rm -rf ipa
           mkdir -p ipa/Payload
@@ -552,23 +867,18 @@ jobs:
           cd ..
 
           echo ""
-          echo "✅ IPA 制作完成"
+          echo "======================================"
+          echo "✅ IPA 制作成功"
+          echo "======================================"
 
-      # -----------------------------------------------------
-      # 14. 查看 IPA
-      # -----------------------------------------------------
-      - name: 查看 IPA
-        shell: bash
-        run: |
-          echo "=========================================="
-          echo "生成结果"
-          echo "=========================================="
+          ls -lh \
+            PureLive-*-iOS-LiveContainer.ipa
 
-          ls -lh PureLive-*.ipa
 
-      # -----------------------------------------------------
-      # 15. 上传 IPA
-      # -----------------------------------------------------
+      # =====================================================
+      # 上传
+      # =====================================================
+
       - name: 上传 IPA
         uses: actions/upload-artifact@v4
         with:

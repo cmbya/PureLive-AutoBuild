@@ -1,4 +1,4 @@
-name: Build Pure Live iOS
+name: Build Pure Live iOS + Twitch
 
 on:
   workflow_dispatch:
@@ -38,19 +38,16 @@ jobs:
           echo "Pure Live：$TAG"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-
   build-ios:
-    name: 编译 Pure Live iOS
+    name: 编译 Pure Live iOS + Twitch
     needs: prepare
     runs-on: macos-26
     timeout-minutes: 120
 
     steps:
-
       # =====================================================
       # 下载源码
       # =====================================================
-
       - name: 下载 Pure Live
         shell: bash
         run: |
@@ -64,18 +61,15 @@ jobs:
           echo "Pure Live：${{ needs.prepare.outputs.tag }}"
           echo "======================================"
 
-
       # =====================================================
       # Flutter
       # =====================================================
-
       - name: 安装 Flutter 3.47.0
         uses: subosito/flutter-action@v2
         with:
           flutter-version: "3.47.0"
           channel: stable
           cache: true
-
 
       - name: 查看编译环境
         shell: bash
@@ -95,28 +89,21 @@ jobs:
           echo "========== iOS SDK =========="
           xcrun --sdk iphoneos --show-sdk-version
 
-
       # =====================================================
       # 关闭 Swift Package Manager
-      #
-      # Pure Live 当前大量插件仍依赖 CocoaPods。
-      # 为了避免 SPM + CocoaPods 混合构建，强制只使用 Pods。
       # =====================================================
-
       - name: 关闭 Swift Package Manager
         shell: bash
         run: |
           flutter config --no-enable-swift-package-manager
 
-
       # =====================================================
-      # 创建专门的 iOS 主程序版本
+      # 修复 Pure Live iOS
+      # 这部分保持之前已经验证成功的方案
       # =====================================================
-
       - name: 修复 Pure Live iOS 源码
         shell: bash
         run: |
-
           python3 <<'PY'
           from pathlib import Path
           import re
@@ -125,51 +112,20 @@ jobs:
           print("开始制作 Pure Live iOS 主程序版")
           print("======================================")
 
-          # ==================================================
           # 1. pubspec.yaml
-          # ==================================================
-
           pubspec = Path("source/pubspec.yaml")
-
           text = pubspec.read_text(encoding="utf-8")
-
-
-          # --------------------------------------------------
-          # file_picker
-          #
-          # Pure Live v2.0.23 使用旧 FilePickerResult API，
-          # 所以必须锁 beta.5。
-          # --------------------------------------------------
 
           old = "file_picker: ^12.0.0-beta.5"
           new = "file_picker: 12.0.0-beta.5"
 
           if old in text:
               text = text.replace(old, new)
-
-              print(
-                  "✅ file_picker 固定为 12.0.0-beta.5"
-              )
-
+              print("✅ file_picker 固定为 12.0.0-beta.5")
           elif new in text:
-
-              print(
-                  "✅ file_picker 已经固定"
-              )
-
+              print("✅ file_picker 已经固定")
           else:
-
-              print(
-                  "ℹ️ 上游 file_picker 已发生变化"
-              )
-
-
-          # --------------------------------------------------
-          # 删除 share_handler
-          #
-          # Pure Live 当前只有 Android 使用它。
-          # iOS 不需要加载 share_handler_ios。
-          # --------------------------------------------------
+              print("ℹ️ 上游 file_picker 已发生变化")
 
           new_text = re.sub(
               r'(?m)^\s{2}share_handler:\s*[^\n]+\n',
@@ -178,112 +134,44 @@ jobs:
           )
 
           if new_text != text:
-
-              print(
-                  "✅ 已从 pubspec 删除 share_handler"
-              )
-
+              print("✅ 已从 pubspec 删除 share_handler")
           else:
-
-              print(
-                  "ℹ️ pubspec 中没有 share_handler"
-              )
+              print("ℹ️ pubspec 中没有 share_handler")
 
           text = new_text
 
-
-          # --------------------------------------------------
-          # 强制这个项目关闭 SwiftPM
-          # --------------------------------------------------
-
-          if (
-              "enable-swift-package-manager: false"
-              not in text
-          ):
-
+          if "enable-swift-package-manager: false" not in text:
               marker = (
                   "flutter:\n"
                   "  uses-material-design: true"
               )
-
               replacement = (
                   "flutter:\n"
                   "  config:\n"
                   "    enable-swift-package-manager: false\n"
                   "  uses-material-design: true"
               )
-
               if marker in text:
+                  text = text.replace(marker, replacement)
+                  print("✅ pubspec 已关闭 SwiftPM")
 
-                  text = text.replace(
-                      marker,
-                      replacement
-                  )
+          pubspec.write_text(text, encoding="utf-8")
 
-                  print(
-                      "✅ pubspec 已关闭 SwiftPM"
-                  )
+          # 2. common/index.dart 删除 share_handler export
+          index_file = Path("source/lib/common/index.dart")
+          text = index_file.read_text(encoding="utf-8")
 
-
-          pubspec.write_text(
-              text,
-              encoding="utf-8"
-          )
-
-
-          # ==================================================
-          # 2. common/index.dart
-          #
-          # 删除 share_handler 的全局 export
-          # ==================================================
-
-          index_file = Path(
-              "source/lib/common/index.dart"
-          )
-
-          text = index_file.read_text(
-              encoding="utf-8"
-          )
-
-          old = (
-              "export "
-              "'package:share_handler/share_handler.dart';\n"
-          )
+          old = "export 'package:share_handler/share_handler.dart';\n"
 
           if old in text:
+              text = text.replace(old, '')
+              print("✅ 已删除 share_handler Dart export")
 
-              text = text.replace(
-                  old,
-                  ''
-              )
+          index_file.write_text(text, encoding="utf-8")
 
-              print(
-                  "✅ 已删除 share_handler Dart export"
-              )
-
-          index_file.write_text(
-              text,
-              encoding="utf-8"
-          )
-
-
-          # ==================================================
-          # 3. main.dart
-          #
-          # Pure Live 的 ShareHandler 本来就只有 Android 使用。
-          # iOS 构建直接删除监听。
-          # ==================================================
-
-          main_file = Path(
-              "source/lib/main.dart"
-          )
-
-          text = main_file.read_text(
-              encoding="utf-8"
-          )
-
-
-          # 删除 initState 中的调用
+          # 3. main.dart 删除 Android ShareHandler 初始化
+          main_file = Path("source/lib/main.dart")
+          text = main_file.read_text(encoding="utf-8")
 
           text = re.sub(
               r'^\s*initSharedMediaListener\(\);\s*\n',
@@ -292,274 +180,125 @@ jobs:
               flags=re.M
           )
 
-
-          # 删除完整方法
-          start_token = (
-              "Future<void> "
-              "initSharedMediaListener() async {"
-          )
-
+          start_token = "Future<void> initSharedMediaListener() async {"
           start = text.find(start_token)
 
           if start != -1:
-
-              # 找到这一行真正开始位置
-              line_start = text.rfind(
-                  '\n',
-                  0,
-                  start
-              ) + 1
-
-              brace_start = text.find(
-                  '{',
-                  start
-              )
+              line_start = text.rfind('\n', 0, start) + 1
+              brace_start = text.find('{', start)
 
               depth = 0
               end = None
 
-              for i in range(
-                  brace_start,
-                  len(text)
-              ):
-
+              for i in range(brace_start, len(text)):
                   if text[i] == '{':
                       depth += 1
-
                   elif text[i] == '}':
                       depth -= 1
-
                       if depth == 0:
                           end = i + 1
                           break
 
               if end is None:
-                  raise SystemExit(
-                      "❌ 无法识别 "
-                      "initSharedMediaListener 方法"
-                  )
+                  raise SystemExit("❌ 无法识别 initSharedMediaListener 方法")
 
-              # 删除后面的换行
-              while (
-                  end < len(text)
-                  and text[end] == '\n'
-              ):
+              while end < len(text) and text[end] == '\n':
                   end += 1
 
-              text = (
-                  text[:line_start]
-                  + text[end:]
-              )
-
-              print(
-                  "✅ 已删除 Android ShareHandler 监听"
-              )
-
+              text = text[:line_start] + text[end:]
+              print("✅ 已删除 Android ShareHandler 监听")
           else:
+              print("ℹ️ main.dart 中没有 initSharedMediaListener")
 
-              print(
-                  "ℹ️ main.dart 中没有 "
-                  "initSharedMediaListener"
-              )
+          main_file.write_text(text, encoding="utf-8")
 
-
-          main_file.write_text(
-              text,
-              encoding="utf-8"
-          )
-
-
-          # ==================================================
-          # 4. Podfile
-          #
-          # share_handler 已经不存在，
-          # ShareExtension Pods 也完全不要。
-          # ==================================================
-
-          podfile = Path(
-              "source/ios/Podfile"
-          )
-
-          text = podfile.read_text(
-              encoding="utf-8"
-          )
-
-
-          # 首选：按照作者留下的注释整体删除
+          # 4. Podfile 删除 ShareExtension
+          podfile = Path("source/ios/Podfile")
+          text = podfile.read_text(encoding="utf-8")
 
           text = re.sub(
-              r'\n\s*'
-              r'# share_handler addition start'
-              r'.*?'
-              r'# share_handler addition end'
-              r'\s*',
+              r'\n\s*# share_handler addition start.*?# share_handler addition end\s*',
               '\n',
               text,
               flags=re.S
           )
 
-
-          # 备用：直接删除 ShareExtension Target
-
           text = re.sub(
-              r"\n\s*target 'ShareExtension' do"
-              r".*?"
-              r"\n\s*end\s*",
+              r"\n\s*target 'ShareExtension' do.*?\n\s*end\s*",
               '\n',
               text,
               flags=re.S
           )
 
-
-          podfile.write_text(
-              text,
-              encoding="utf-8"
-          )
+          podfile.write_text(text, encoding="utf-8")
 
           if "target 'ShareExtension'" in text:
+              raise SystemExit("❌ Podfile 仍然存在 ShareExtension")
 
-              raise SystemExit(
-                  "❌ Podfile 仍然存在 ShareExtension"
-              )
+          print("✅ Podfile 已删除 ShareExtension")
 
-          print(
-              "✅ Podfile 已删除 ShareExtension"
-          )
-
-
-          # ==================================================
-          # 5. Runner Xcode 工程
-          #
-          # 不删除整个 Target。
-          #
-          # 只切断：
-          #
-          # Runner
-          #  ├─ Embed Foundation Extensions
-          #  └─ ShareExtension Dependency
-          #
-          # Runner.xcscheme 本身只编译 Runner.app。
-          # ==================================================
-
+          # 5. Runner Xcode 工程只断开 ShareExtension，不删除 Target
           project = Path(
-              "source/ios/"
-              "Runner.xcodeproj/"
-              "project.pbxproj"
+              "source/ios/Runner.xcodeproj/project.pbxproj"
           )
 
-          text = project.read_text(
-              encoding="utf-8"
-          )
-
-
-          # 找 Embed Foundation Extensions ID
+          text = project.read_text(encoding="utf-8")
 
           phase_match = re.search(
-              r'([A-F0-9]{24}) '
-              r'/\* Embed Foundation Extensions \*/'
-              r' = \{',
+              r'([A-F0-9]{24}) /\* Embed Foundation Extensions \*/ = \{',
               text
           )
 
-          phase_id = (
-              phase_match.group(1)
-              if phase_match
-              else None
-          )
-
-
-          # 找 ShareExtension Dependency ID
+          phase_id = phase_match.group(1) if phase_match else None
 
           dep_id = None
-
           dep_pattern = re.compile(
-              r'([A-F0-9]{24}) '
-              r'/\* PBXTargetDependency \*/'
-              r' = \{'
+              r'([A-F0-9]{24}) /\* PBXTargetDependency \*/ = \{'
               r'(.*?)'
               r'\n\s*\};',
               re.S
           )
 
-          for match in dep_pattern.finditer(
-              text
-          ):
-
+          for match in dep_pattern.finditer(text):
               body = match.group(2)
-
-              if (
-                  "ShareExtension"
-                  in body
-              ):
-
+              if "ShareExtension" in body:
                   dep_id = match.group(1)
                   break
 
-
-          # 找 Runner PBXNativeTarget
-
           runner_pattern = re.compile(
-              r'([A-F0-9]{24}) '
-              r'/\* Runner \*/ = \{'
+              r'([A-F0-9]{24}) /\* Runner \*/ = \{'
               r'\n\s*isa = PBXNativeTarget;'
               r'.*?'
               r'\n\s*\};',
               re.S
           )
 
-          runner_match = (
-              runner_pattern.search(text)
-          )
+          runner_match = runner_pattern.search(text)
 
           if not runner_match:
-
-              raise SystemExit(
-                  "❌ 找不到 Runner Target"
-              )
-
+              raise SystemExit("❌ 找不到 Runner Target")
 
           runner = runner_match.group(0)
 
-
-          # 删除 Embed Foundation Extensions 引用
-
           if phase_id:
-
               runner = re.sub(
-                  rf'^\s*'
-                  rf'{re.escape(phase_id)} '
-                  rf'/\* Embed Foundation Extensions \*/,'
-                  rf'\s*\n',
+                  rf'^\s*{re.escape(phase_id)} '
+                  rf'/\* Embed Foundation Extensions \*/,\s*\n',
                   '',
                   runner,
                   flags=re.M
               )
-
-              print(
-                  "✅ 已断开 "
-                  "Embed Foundation Extensions"
-              )
-
-
-          # 删除 Runner → ShareExtension dependency
+              print("✅ 已断开 Embed Foundation Extensions")
 
           if dep_id:
-
               runner = re.sub(
-                  rf'^\s*'
-                  rf'{re.escape(dep_id)} '
-                  rf'/\* PBXTargetDependency \*/,'
-                  rf'\s*\n',
+                  rf'^\s*{re.escape(dep_id)} '
+                  rf'/\* PBXTargetDependency \*/,\s*\n',
                   '',
                   runner,
                   flags=re.M
               )
-
-              print(
-                  "✅ 已断开 "
-                  "Runner → ShareExtension"
-              )
-
+              print("✅ 已断开 Runner → ShareExtension")
 
           text = (
               text[:runner_match.start()]
@@ -567,22 +306,11 @@ jobs:
               + text[runner_match.end():]
           )
 
-          project.write_text(
-              text,
-              encoding="utf-8"
-          )
+          project.write_text(text, encoding="utf-8")
 
-
-          # ==================================================
           # 6. 清空 Runner App Group entitlement
-          #
-          # 当前 App Group 只是 ShareExtension 使用。
-          # LiveContainer 也不需要。
-          # ==================================================
-
           entitlements = Path(
-              "source/ios/Runner/"
-              "Runner.entitlements"
+              "source/ios/Runner/Runner.entitlements"
           )
 
           entitlements.write_text(
@@ -596,103 +324,1095 @@ jobs:
               encoding="utf-8"
           )
 
-          print(
-              "✅ 已清空 ShareExtension App Group"
-          )
+          print("✅ 已清空 ShareExtension App Group")
 
-
-          # ==================================================
           # 最终验证
-          # ==================================================
-
-          pub = pubspec.read_text(
-              encoding="utf-8"
-          )
-
-          idx = index_file.read_text(
-              encoding="utf-8"
-          )
-
-          main = main_file.read_text(
-              encoding="utf-8"
-          )
-
-          pod = podfile.read_text(
-              encoding="utf-8"
-          )
+          pub = pubspec.read_text(encoding="utf-8")
+          idx = index_file.read_text(encoding="utf-8")
+          main = main_file.read_text(encoding="utf-8")
+          pod = podfile.read_text(encoding="utf-8")
 
           errors = []
 
+          if re.search(r'(?m)^\s{2}share_handler:', pub):
+              errors.append("pubspec 仍存在 share_handler")
 
-          if re.search(
-              r'(?m)^\s{2}share_handler:',
-              pub
-          ):
-              errors.append(
-                  "pubspec 仍存在 share_handler"
-              )
+          if "package:share_handler/" in idx:
+              errors.append("common/index.dart 仍引用 share_handler")
 
+          if "ShareHandler.instance" in main:
+              errors.append("main.dart 仍存在 ShareHandler")
 
-          if (
-              "package:share_handler/"
-              in idx
-          ):
-              errors.append(
-                  "common/index.dart "
-                  "仍引用 share_handler"
-              )
-
-
-          if (
-              "ShareHandler.instance"
-              in main
-          ):
-              errors.append(
-                  "main.dart "
-                  "仍存在 ShareHandler"
-              )
-
-
-          if (
-              "target 'ShareExtension'"
-              in pod
-          ):
-              errors.append(
-                  "Podfile "
-                  "仍存在 ShareExtension"
-              )
-
+          if "target 'ShareExtension'" in pod:
+              errors.append("Podfile 仍存在 ShareExtension")
 
           if errors:
-
               for error in errors:
-                  print(
-                      "❌ " + error
-                  )
-
-              raise SystemExit(
-                  "iOS 源码修复验证失败"
-              )
-
+                  print("❌ " + error)
+              raise SystemExit("iOS 源码修复验证失败")
 
           print("")
-          print(
-              "======================================"
-          )
-          print(
-              "✅ Pure Live iOS 主程序版准备完成"
-          )
-          print(
-              "======================================"
-          )
-
+          print("======================================")
+          print("✅ Pure Live iOS 主程序版准备完成")
+          print("======================================")
           PY
 
+      # =====================================================
+      # 加入 Twitch
+      #
+      # Twitch 的平台请求/播放逻辑来自 simp 的 Twitch 实现，
+      # 这里已重新适配 Pure Live 的 LiveSite / LiveRoom 接口。
+      # =====================================================
+      - name: 加入 Twitch 支持
+        shell: bash
+        run: |
+          echo "======================================"
+          echo "添加 TwitchSite"
+          echo "======================================"
+
+          mkdir -p source/lib/core/site
+          mkdir -p source/lib/core/danmaku
+
+          cat > source/lib/core/danmaku/twitch_danmaku.dart <<'DART'
+          import 'dart:convert';
+
+          import 'package:pure_live/common/models/live_message.dart';
+          import 'package:pure_live/core/common/web_socket_util.dart';
+          import 'package:pure_live/core/interface/live_danmaku.dart';
+
+          class TwitchDanmakuArgs {
+            final String roomId;
+
+            TwitchDanmakuArgs({required this.roomId});
+          }
+
+          class TwitchDanmaku implements LiveDanmaku {
+            @override
+            int heartbeatTime = 4 * 60 * 1000;
+
+            bool _connected = false;
+
+            @override
+            bool get isConnected => _connected;
+
+            @override
+            void markConnected() {
+              _connected = true;
+            }
+
+            @override
+            void markDisconnected() {
+              _connected = false;
+            }
+
+            @override
+            Function(LiveMessage msg)? onMessage;
+
+            @override
+            Function(String msg)? onClose;
+
+            @override
+            Function()? onReady;
+
+            WebScoketUtils? webScoketUtils;
+
+            @override
+            Future start(dynamic args) async {
+              if (args is! TwitchDanmakuArgs || args.roomId.isEmpty) {
+                onClose?.call('Twitch 弹幕参数错误');
+                return;
+              }
+
+              webScoketUtils = WebScoketUtils(
+                url: 'wss://irc-ws.chat.twitch.tv:443',
+                heartBeatTime: heartbeatTime,
+                onMessage: decodeMessage,
+                onReady: () {
+                  markConnected();
+                  onReady?.call();
+                  joinRoom(args.roomId);
+                },
+                onHeartBeat: heartbeat,
+                onReconnect: () {
+                  markDisconnected();
+                  onClose?.call('与 Twitch 弹幕服务器断开连接，正在尝试重连');
+                },
+                onClose: (e) {
+                  markDisconnected();
+                  onClose?.call('Twitch 弹幕服务器连接失败 $e');
+                },
+              );
+
+              webScoketUtils?.connect();
+            }
+
+            void joinRoom(String roomId) {
+              final channel = roomId.toLowerCase();
+
+              webScoketUtils?.sendMessage(
+                'CAP REQ :twitch.tv/tags twitch.tv/commands'
+              );
+              webScoketUtils?.sendMessage('PASS SCHMOOPIIE');
+              webScoketUtils?.sendMessage(
+                'NICK justinfan${DateTime.now().millisecondsSinceEpoch % 100000}'
+              );
+              webScoketUtils?.sendMessage('JOIN #$channel');
+            }
+
+            @override
+            void heartbeat() {
+              webScoketUtils?.sendMessage('PING :tmi.twitch.tv');
+            }
+
+            @override
+            Future stop() async {
+              onMessage = null;
+              onClose = null;
+              markDisconnected();
+              webScoketUtils?.close();
+            }
+
+            void decodeMessage(dynamic data) {
+              try {
+                final text = data.toString();
+
+                for (final line in const LineSplitter().convert(text)) {
+                  if (line.isEmpty) {
+                    continue;
+                  }
+
+                  if (line.startsWith('PING')) {
+                    webScoketUtils?.sendMessage(
+                      line.replaceFirst('PING', 'PONG')
+                    );
+                    continue;
+                  }
+
+                  if (line.contains('PRIVMSG')) {
+                    final liveMsg = _parsePrivMsg(line);
+
+                    if (liveMsg != null) {
+                      onMessage?.call(liveMsg);
+                    }
+                  }
+                }
+              } catch (_) {}
+            }
+
+            LiveMessage? _parsePrivMsg(String line) {
+              final privIndex = line.indexOf('PRIVMSG');
+              final msgStart = line.indexOf(' :', privIndex);
+
+              if (msgStart < 0) {
+                return null;
+              }
+
+              final tags = _parseTags(line);
+              final message = line.substring(msgStart + 2);
+
+              final userName =
+                  tags['display-name']?.isNotEmpty == true
+                      ? tags['display-name']!
+                      : _parseUserName(line);
+
+              final color = _parseColor(tags['color']);
+
+              return LiveMessage(
+                type: LiveMessageType.chat,
+                userName: userName,
+                message: message,
+                color: color,
+              );
+            }
+
+            Map<String, String> _parseTags(String line) {
+              if (!line.startsWith('@')) {
+                return {};
+              }
+
+              final end = line.indexOf(' ');
+
+              if (end <= 1) {
+                return {};
+              }
+
+              final result = <String, String>{};
+
+              for (final item in line.substring(1, end).split(';')) {
+                final index = item.indexOf('=');
+
+                if (index <= 0) {
+                  continue;
+                }
+
+                result[item.substring(0, index)] =
+                    _unescapeTag(item.substring(index + 1));
+              }
+
+              return result;
+            }
+
+            String _parseUserName(String line) {
+              final start = line.indexOf(':');
+              final end = line.indexOf('!');
+
+              if (start >= 0 && end > start) {
+                return line.substring(start + 1, end);
+              }
+
+              return 'Twitch';
+            }
+
+            String _unescapeTag(String value) {
+              return value
+                  .replaceAll(r'\s', ' ')
+                  .replaceAll(r'\:', ';')
+                  .replaceAll(r'\\', r'\')
+                  .replaceAll(r'\r', '\r')
+                  .replaceAll(r'\n', '\n');
+            }
+
+            LiveMessageColor _parseColor(String? color) {
+              if (
+                color == null ||
+                color.isEmpty ||
+                !color.startsWith('#')
+              ) {
+                return LiveMessageColor.white;
+              }
+
+              final value = int.tryParse(
+                color.substring(1),
+                radix: 16,
+              );
+
+              if (value == null) {
+                return LiveMessageColor.white;
+              }
+
+              return LiveMessageColor.numberToColor(value);
+            }
+          }
+          DART
+
+          cat > source/lib/core/site/twitch_site.dart <<'DART'
+          import 'dart:convert';
+
+          import 'package:http/http.dart' as http;
+          import 'package:pure_live/common/models/live_area.dart';
+          import 'package:pure_live/common/models/live_room.dart';
+          import 'package:pure_live/core/danmaku/twitch_danmaku.dart';
+          import 'package:pure_live/core/interface/live_danmaku.dart';
+          import 'package:pure_live/core/interface/live_site.dart';
+          import 'package:pure_live/model/live_category.dart';
+          import 'package:pure_live/model/live_play_quality.dart';
+
+          class TwitchSite implements LiveSite {
+            static const String platformId = 'twitch';
+
+            @override
+            String id = platformId;
+
+            @override
+            String name = 'Twitch';
+
+            final String _gqlUrl = 'https://gql.twitch.tv/gql';
+
+            // 与 simp 当前 Twitch 实现保持一致
+            final String _clientId =
+                'kimne78kx3ncx6brgo4mv6wki5h1ko';
+
+            @override
+            LiveDanmaku getDanmaku() => TwitchDanmaku();
+
+            Future<dynamic> _postGql(
+              Map<String, dynamic> query,
+            ) async {
+              final response = await http.post(
+                Uri.parse(_gqlUrl),
+                headers: {
+                  'Client-Id': _clientId,
+                  'Content-Type': 'application/json',
+                },
+                body: jsonEncode([query]),
+              );
+
+              if (
+                response.statusCode < 200 ||
+                response.statusCode >= 300
+              ) {
+                throw Exception(
+                  'Twitch GraphQL HTTP ${response.statusCode}'
+                );
+              }
+
+              final decoded = jsonDecode(response.body);
+
+              if (
+                decoded is! List ||
+                decoded.isEmpty
+              ) {
+                throw Exception('Twitch GraphQL 返回格式异常');
+              }
+
+              final first = decoded.first;
+
+              if (first is Map && first['errors'] != null) {
+                throw Exception(first['errors'].toString());
+              }
+
+              return first['data'];
+            }
+
+            Future<Map<String, dynamic>?>
+                _getPlaybackAccessToken(
+              String roomId,
+            ) async {
+              final body = {
+                'query':
+                    'query(\$login: String!) { '
+                    'streamPlaybackAccessToken('
+                    'channelName: \$login, '
+                    'params: {'
+                    'platform: "web", '
+                    'playerBackend: "mediaplayer", '
+                    'playerType: "site"'
+                    '}'
+                    ') { value signature } '
+                    '}',
+                'variables': {
+                  'login': roomId,
+                },
+              };
+
+              final response = await http.post(
+                Uri.parse(_gqlUrl),
+                headers: {
+                  'Client-Id': _clientId,
+                  'Content-Type': 'application/json',
+                },
+                body: jsonEncode(body),
+              );
+
+              if (
+                response.statusCode < 200 ||
+                response.statusCode >= 300
+              ) {
+                throw Exception(
+                  'Twitch Token HTTP ${response.statusCode}'
+                );
+              }
+
+              final jsonRes = jsonDecode(response.body);
+
+              if (jsonRes['errors'] != null) {
+                throw Exception(
+                  jsonRes['errors'][0]['message'].toString()
+                );
+              }
+
+              final data =
+                  jsonRes['data']?['streamPlaybackAccessToken'];
+
+              if (data is Map<String, dynamic>) {
+                return data;
+              }
+
+              if (data is Map) {
+                return Map<String, dynamic>.from(data);
+              }
+
+              return null;
+            }
+
+            String _buildMasterPlaylistUrl({
+              required String roomId,
+              required String sig,
+              required String token,
+            }) {
+              final query = {
+                'allow_source': 'true',
+                'allow_audio_only': 'true',
+                'fast_bread': 'true',
+                'p':
+                    DateTime.now()
+                        .millisecondsSinceEpoch
+                        .toString(),
+                'sig': sig,
+                'token': token,
+              };
+
+              return Uri.https(
+                'usher.ttvnw.net',
+                '/api/channel/hls/$roomId.m3u8',
+                query,
+              ).toString();
+            }
+
+            int _safePageSize(int pageSize) {
+              if (pageSize < 1) {
+                return 30;
+              }
+
+              if (pageSize > 100) {
+                return 100;
+              }
+
+              return pageSize;
+            }
+
+            LiveRoom _streamToRoom(dynamic node) {
+              final broadcaster = node['broadcaster'];
+
+              final login =
+                  broadcaster?['login']?.toString() ?? '';
+
+              final displayName =
+                  broadcaster?['displayName']?.toString() ??
+                  login;
+
+              return LiveRoom(
+                roomId: login,
+                userId: login,
+                title: node['title']?.toString() ?? '',
+                nick: displayName,
+                avatar:
+                    broadcaster?['profileImageURL']
+                        ?.toString() ??
+                    '',
+                cover:
+                    node['previewImageURL']?.toString() ?? '',
+                watching:
+                    node['viewersCount']?.toString() ?? '0',
+                platform: platformId,
+                status: true,
+                liveStatus: LiveStatus.live,
+                link: 'https://www.twitch.tv/$login',
+              );
+            }
+
+            @override
+            Future<List<LiveRoom>> getRecommendRooms({
+              int page = 1,
+              int pageSize = 30,
+            }) async {
+              final first = _safePageSize(pageSize);
+
+              final query = {
+                'query':
+                    'query { '
+                    'streams(first: $first) { '
+                    'edges { '
+                    'node { '
+                    'broadcaster { '
+                    'login '
+                    'displayName '
+                    'profileImageURL(width: 100)'
+                    '} '
+                    'title '
+                    'viewersCount '
+                    'previewImageURL(width: 640, height: 360)'
+                    '} '
+                    '} '
+                    '} '
+                    '}',
+              };
+
+              final data = await _postGql(query);
+
+              final edges =
+                  data?['streams']?['edges'] as List? ?? [];
+
+              final result = <LiveRoom>[];
+
+              for (final edge in edges) {
+                final node = edge?['node'];
+
+                if (node == null) {
+                  continue;
+                }
+
+                result.add(_streamToRoom(node));
+              }
+
+              return result;
+            }
+
+            @override
+            Future<List<LiveCategory>> getCategores(
+              int page,
+              int pageSize,
+            ) async {
+              final first = _safePageSize(pageSize);
+
+              final query = {
+                'query':
+                    'query { '
+                    'directoriesWithTags(first: $first) { '
+                    'edges { '
+                    'node { '
+                    'id '
+                    'name '
+                    'avatarURL(width: 144, height: 192)'
+                    '} '
+                    '} '
+                    '} '
+                    '}',
+              };
+
+              final data = await _postGql(query);
+
+              final children = <LiveArea>[];
+
+              final edges =
+                  data?['directoriesWithTags']?['edges']
+                      as List? ??
+                  [];
+
+              for (final edge in edges) {
+                final node = edge?['node'];
+
+                if (node == null) {
+                  continue;
+                }
+
+                final categoryName =
+                    node['name']?.toString() ?? '';
+
+                if (categoryName.isEmpty) {
+                  continue;
+                }
+
+                children.add(
+                  LiveArea(
+                    platform: platformId,
+                    areaType: 'all',
+                    typeName: '热门分类',
+                    areaId: categoryName,
+                    areaName: categoryName,
+                    areaPic:
+                        node['avatarURL']?.toString() ?? '',
+                  ),
+                );
+              }
+
+              return [
+                LiveCategory(
+                  id: 'all',
+                  name: '热门分类',
+                  children: children,
+                ),
+              ];
+            }
+
+            @override
+            Future<List<LiveRoom>> getCategoryRooms(
+              LiveArea category, {
+              int page = 1,
+              int pageSize = 30,
+            }) async {
+              final first = _safePageSize(pageSize);
+
+              final gameName =
+                  (category.areaName?.isNotEmpty ?? false)
+                      ? category.areaName!
+                      : (category.areaId ?? '');
+
+              if (gameName.isEmpty) {
+                return [];
+              }
+
+              final query = {
+                'query':
+                    'query(\$game: String!) { '
+                    'game(name: \$game) { '
+                    'streams(first: $first) { '
+                    'edges { '
+                    'node { '
+                    'broadcaster { '
+                    'login '
+                    'displayName '
+                    'profileImageURL(width: 100)'
+                    '} '
+                    'title '
+                    'viewersCount '
+                    'previewImageURL(width: 640, height: 360)'
+                    '} '
+                    '} '
+                    '} '
+                    '} '
+                    '}',
+                'variables': {
+                  'game': gameName,
+                },
+              };
+
+              final data = await _postGql(query);
+
+              final edges =
+                  data?['game']?['streams']?['edges']
+                      as List? ??
+                  [];
+
+              final result = <LiveRoom>[];
+
+              for (final edge in edges) {
+                final node = edge?['node'];
+
+                if (node == null) {
+                  continue;
+                }
+
+                result.add(_streamToRoom(node));
+              }
+
+              return result;
+            }
+
+            @override
+            Future<bool> getLiveStatus({
+              required String platform,
+              required String roomId,
+            }) async {
+              final query = {
+                'query':
+                    'query(\$login: String!) { '
+                    'user(login: \$login) { '
+                    'stream { id } '
+                    '} '
+                    '}',
+                'variables': {
+                  'login': roomId,
+                },
+              };
+
+              final data = await _postGql(query);
+
+              return
+                  data?['user'] != null &&
+                  data?['user']?['stream'] != null;
+            }
+
+            @override
+            Future<LiveRoom> getRoomDetail({
+              required String roomId,
+              required String platform,
+            }) async {
+              final query = {
+                'query':
+                    'query(\$login: String!) { '
+                    'user(login: \$login) { '
+                    'displayName '
+                    'profileImageURL(width: 100) '
+                    'stream { '
+                    'title '
+                    'viewersCount '
+                    'previewImageURL(width: 640, height: 360)'
+                    '} '
+                    '} '
+                    '}',
+                'variables': {
+                  'login': roomId,
+                },
+              };
+
+              final data = await _postGql(query);
+              final user = data?['user'];
+
+              if (user == null) {
+                return LiveRoom(
+                  roomId: roomId,
+                  userId: roomId,
+                  title: '未开播 / 离线',
+                  nick: roomId,
+                  platform: platformId,
+                  status: false,
+                  liveStatus: LiveStatus.offline,
+                  link: 'https://www.twitch.tv/$roomId',
+                  danmakuData: TwitchDanmakuArgs(
+                    roomId: roomId,
+                  ),
+                );
+              }
+
+              final stream = user['stream'];
+              final isLive = stream != null;
+
+              return LiveRoom(
+                roomId: roomId,
+                userId: roomId,
+                title:
+                    isLive
+                        ? stream['title']?.toString() ?? ''
+                        : '未开播 / 离线',
+                nick:
+                    user['displayName']?.toString() ??
+                    roomId,
+                avatar:
+                    user['profileImageURL']?.toString() ?? '',
+                cover:
+                    isLive
+                        ? stream['previewImageURL']
+                                ?.toString() ??
+                            ''
+                        : '',
+                watching:
+                    isLive
+                        ? stream['viewersCount']
+                                ?.toString() ??
+                            '0'
+                        : '0',
+                platform: platformId,
+                status: isLive,
+                liveStatus:
+                    isLive
+                        ? LiveStatus.live
+                        : LiveStatus.offline,
+                link: 'https://www.twitch.tv/$roomId',
+                danmakuData: TwitchDanmakuArgs(
+                  roomId: roomId,
+                ),
+              );
+            }
+
+            @override
+            Future<List<LivePlayQuality>> getPlayQualites({
+              required LiveRoom detail,
+            }) async {
+              try {
+                final roomId = detail.roomId ?? '';
+
+                if (roomId.isEmpty) {
+                  return [];
+                }
+
+                final tokenData =
+                    await _getPlaybackAccessToken(roomId);
+
+                if (tokenData == null) {
+                  return _fallbackQualities();
+                }
+
+                final masterUrl = _buildMasterPlaylistUrl(
+                  roomId: roomId,
+                  sig:
+                      tokenData['signature']?.toString() ?? '',
+                  token:
+                      tokenData['value']?.toString() ?? '',
+                );
+
+                final response = await http.get(
+                  Uri.parse(masterUrl),
+                );
+
+                if (
+                  response.statusCode < 200 ||
+                  response.statusCode >= 300
+                ) {
+                  return _fallbackQualities(
+                    masterUrl: masterUrl,
+                  );
+                }
+
+                final qualities = _parseM3u8Qualities(
+                  response.body,
+                  masterUrl,
+                );
+
+                if (qualities.isEmpty) {
+                  return _fallbackQualities(
+                    masterUrl: masterUrl,
+                  );
+                }
+
+                return qualities;
+              } catch (_) {
+                return _fallbackQualities();
+              }
+            }
+
+            @override
+            Future<List<String>> getPlayUrls({
+              required LiveRoom detail,
+              required LivePlayQuality quality,
+            }) async {
+              try {
+                if (
+                  quality.data is String &&
+                  quality.data.toString().isNotEmpty
+                ) {
+                  return [
+                    quality.data.toString(),
+                  ];
+                }
+
+                final roomId = detail.roomId ?? '';
+
+                if (roomId.isEmpty) {
+                  return [];
+                }
+
+                final tokenData =
+                    await _getPlaybackAccessToken(roomId);
+
+                if (tokenData == null) {
+                  return [];
+                }
+
+                final videoUrl = _buildMasterPlaylistUrl(
+                  roomId: roomId,
+                  sig:
+                      tokenData['signature']?.toString() ?? '',
+                  token:
+                      tokenData['value']?.toString() ?? '',
+                );
+
+                return [videoUrl];
+              } catch (_) {
+                return [];
+              }
+            }
+
+            List<LivePlayQuality> _parseM3u8Qualities(
+              String body,
+              String masterUrl,
+            ) {
+              final result = <LivePlayQuality>[];
+              final lines =
+                  const LineSplitter().convert(body);
+
+              final baseUri = Uri.parse(masterUrl);
+
+              for (
+                var i = 0;
+                i < lines.length;
+                i++
+              ) {
+                final line = lines[i].trim();
+
+                if (
+                  !line.startsWith(
+                    '#EXT-X-STREAM-INF'
+                  )
+                ) {
+                  continue;
+                }
+
+                final urlLine =
+                    i + 1 < lines.length
+                        ? lines[i + 1].trim()
+                        : '';
+
+                if (
+                  urlLine.isEmpty ||
+                  urlLine.startsWith('#')
+                ) {
+                  continue;
+                }
+
+                final resolution =
+                    RegExp(
+                      r'RESOLUTION=\d+x(\d+)'
+                    )
+                    .firstMatch(line)
+                    ?.group(1);
+
+                final frameRateText =
+                    RegExp(
+                      r'FRAME-RATE=([0-9.]+)'
+                    )
+                    .firstMatch(line)
+                    ?.group(1);
+
+                final name =
+                    RegExp(
+                      r'VIDEO="([^"]+)"'
+                    )
+                    .firstMatch(line)
+                    ?.group(1);
+
+                final frameRate =
+                    double.tryParse(
+                      frameRateText ?? '',
+                    );
+
+                final height =
+                    int.tryParse(
+                      resolution ?? '',
+                    ) ??
+                    0;
+
+                final url =
+                    Uri.parse(urlLine).isAbsolute
+                        ? urlLine
+                        : baseUri
+                            .resolve(urlLine)
+                            .toString();
+
+                if (
+                  height == 0 &&
+                  name == 'audio_only'
+                ) {
+                  continue;
+                }
+
+                var title =
+                    name ??
+                    (
+                      height > 0
+                          ? '${height}p'
+                          : '自动'
+                    );
+
+                if (height > 0) {
+                  title =
+                      '${height}p'
+                      '${frameRate != null && frameRate >= 50 ? '60' : ''}';
+                }
+
+                result.add(
+                  LivePlayQuality(
+                    quality: title,
+                    sort:
+                        height * 1000 +
+                        (frameRate?.round() ?? 0),
+                    data: url,
+                  ),
+                );
+              }
+
+              result.sort(
+                (a, b) => b.sort.compareTo(a.sort),
+              );
+
+              for (
+                var i = 0;
+                i < result.length;
+                i++
+              ) {
+                final item = result[i];
+
+                if (
+                  i == 0 &&
+                  !item.quality.contains('来源')
+                ) {
+                  result[i] = LivePlayQuality(
+                    quality:
+                        '${item.quality}（来源）',
+                    sort: item.sort,
+                    data: item.data,
+                  );
+                }
+              }
+
+              return result;
+            }
+
+            List<LivePlayQuality> _fallbackQualities({
+              String? masterUrl,
+            }) {
+              return [
+                LivePlayQuality(
+                  quality: '自动',
+                  sort: 10000,
+                  data: masterUrl ?? '',
+                ),
+              ];
+            }
+          }
+          DART
+
+          # ---------------------------------------------------
+          # 注册 Twitch 到 Pure Live
+          # 暂时使用 Pure 自带 logo，先验证功能；
+          # Twitch 功能确认正常后再换正式图标。
+          # ---------------------------------------------------
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path("source/lib/core/sites.dart")
+          text = path.read_text(encoding="utf-8")
+
+          twitch_import = (
+              "import 'package:pure_live/core/site/twitch_site.dart';\n"
+          )
+
+          if twitch_import not in text:
+              marker = (
+                  "import 'package:pure_live/core/site/kuaishou_site.dart';\n"
+              )
+
+              if marker not in text:
+                  raise SystemExit(
+                      "❌ sites.dart 导入结构变化，无法自动加入 Twitch"
+                  )
+
+              text = text.replace(
+                  marker,
+                  marker + twitch_import,
+              )
+
+          const_line = (
+              '  static const String twitchSite = "twitch";\n'
+          )
+
+          if const_line not in text:
+              marker = (
+                  '  static const String iptvSite = "iptv";\n'
+              )
+
+              if marker not in text:
+                  raise SystemExit(
+                      "❌ sites.dart 常量结构变化，无法自动加入 Twitch"
+                  )
+
+              text = text.replace(
+                  marker,
+                  marker + const_line,
+              )
+
+          site_line = (
+              '    Site(id: "twitch", name: "Twitch", '
+              'logo: "assets/images/logo.png", '
+              'liveSite: TwitchSite()),\n'
+          )
+
+          if site_line not in text:
+              marker = (
+                  '    Site(id: "iptv", '
+                  'name: i18n("site_iptv"), '
+                  'logo: "assets/images/logo.png", '
+                  'liveSite: IptvSite()),\n'
+              )
+
+              if marker not in text:
+                  raise SystemExit(
+                      "❌ sites.dart supportSites 结构变化，无法自动加入 Twitch"
+                  )
+
+              text = text.replace(
+                  marker,
+                  site_line + marker,
+              )
+
+          path.write_text(text, encoding="utf-8")
+
+          print("✅ Twitch 已注册到 Sites.supportSites")
+          PY
+
+          echo ""
+          echo "========== Twitch 文件 =========="
+          ls -lh \
+            source/lib/core/site/twitch_site.dart \
+            source/lib/core/danmaku/twitch_danmaku.dart
+
+          echo ""
+          echo "========== sites.dart Twitch =========="
+          grep -n "twitch" source/lib/core/sites.dart
 
       # =====================================================
       # 清理所有旧生成物
       # =====================================================
-
       - name: 清理 iOS 构建缓存
         shell: bash
         run: |
@@ -707,11 +1427,9 @@ jobs:
 
           flutter clean
 
-
       # =====================================================
       # 获取依赖
       # =====================================================
-
       - name: 获取 Flutter 依赖
         working-directory: source
         shell: bash
@@ -737,6 +1455,7 @@ jobs:
              grep -q "share_handler"; then
 
             echo "❌ share_handler 仍存在"
+
             flutter pub deps |
               grep "share_handler"
 
@@ -748,11 +1467,22 @@ jobs:
 
           fi
 
+      # =====================================================
+      # Dart 静态检查
+      # 只检查我们新加的 Twitch 文件和 sites.dart
+      # =====================================================
+      - name: 检查 Twitch Dart 代码
+        working-directory: source
+        shell: bash
+        run: |
+          dart analyze \
+            lib/core/site/twitch_site.dart \
+            lib/core/danmaku/twitch_danmaku.dart \
+            lib/core/sites.dart
 
       # =====================================================
       # CocoaPods
       # =====================================================
-
       - name: 安装 CocoaPods
         working-directory: source/ios
         shell: bash
@@ -768,11 +1498,9 @@ jobs:
           echo ""
           echo "✅ CocoaPods 安装完成"
 
-
       # =====================================================
       # 检查 Xcode 工程
       # =====================================================
-
       - name: 检查 Xcode 工程
         shell: bash
         run: |
@@ -783,17 +1511,15 @@ jobs:
           echo ""
           echo "✅ Xcode 工程可正常读取"
 
-
       # =====================================================
       # 编译
       # =====================================================
-
       - name: 编译无签名 iOS
         working-directory: source
         shell: bash
         run: |
           echo "======================================"
-          echo "开始编译 Pure Live iOS 主程序"
+          echo "开始编译 Pure Live iOS + Twitch"
           echo "======================================"
 
           flutter build ios \
@@ -801,21 +1527,17 @@ jobs:
             --no-codesign \
             --no-pub
 
-
       # =====================================================
       # 检查结果
       # =====================================================
-
       - name: 检查 Runner.app
         shell: bash
         run: |
           APP="source/build/ios/iphoneos/Runner.app"
 
           if [ ! -d "$APP" ]; then
-
             echo "❌ Runner.app 不存在"
             exit 1
-
           fi
 
           echo "======================================"
@@ -827,20 +1549,15 @@ jobs:
           echo ""
 
           if [ -d "$APP/PlugIns" ]; then
-
             echo "发现 PlugIns："
             ls -la "$APP/PlugIns"
-
           else
-
             echo "✅ 没有 ShareExtension"
           fi
-
 
       # =====================================================
       # 制作 LiveContainer IPA
       # =====================================================
-
       - name: 制作 IPA
         shell: bash
         run: |
@@ -854,14 +1571,13 @@ jobs:
             source/build/ios/iphoneos/Runner.app \
             ipa/Payload/
 
-          # 双保险
           rm -rf \
             ipa/Payload/Runner.app/PlugIns
 
           cd ipa
 
           zip -qry \
-            "../PureLive-${VERSION}-iOS-LiveContainer.ipa" \
+            "../PureLive-${VERSION}-Twitch-iOS-LiveContainer.ipa" \
             Payload
 
           cd ..
@@ -872,17 +1588,15 @@ jobs:
           echo "======================================"
 
           ls -lh \
-            PureLive-*-iOS-LiveContainer.ipa
-
+            PureLive-*-Twitch-iOS-LiveContainer.ipa
 
       # =====================================================
       # 上传
       # =====================================================
-
       - name: 上传 IPA
         uses: actions/upload-artifact@v4
         with:
-          name: PureLive-iOS-${{ needs.prepare.outputs.tag }}
-          path: PureLive-*-iOS-LiveContainer.ipa
+          name: PureLive-Twitch-iOS-${{ needs.prepare.outputs.tag }}
+          path: PureLive-*-Twitch-iOS-LiveContainer.ipa
           retention-days: 7
           if-no-files-found: error

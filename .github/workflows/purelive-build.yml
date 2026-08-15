@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   # =========================================================
-  # 第一步：获取 Pure Live 要编译的版本
+  # 1. 获取 Pure Live 版本
   # =========================================================
   prepare:
     name: 获取 Pure Live 版本
@@ -24,7 +24,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
 
     steps:
-      - name: 获取版本
+      - name: 获取 Pure Live 版本
         id: version
         shell: bash
         env:
@@ -45,40 +45,33 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
   # =========================================================
-  # 第二步：编译 iOS
+  # 2. 编译 iOS
   # =========================================================
   build-ios:
     name: 编译 iOS IPA
     needs: prepare
 
-    # 这里改为 macOS 26
-    # 主要是为了使用更新的 Xcode / iOS SDK
+    # 使用新版 Xcode / iOS SDK
     runs-on: macos-26
 
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
       # -----------------------------------------------------
-      # 1. 查看 Mac / Xcode / iOS SDK 环境
+      # 1. 查看系统环境
       # -----------------------------------------------------
       - name: 查看 Xcode 和 iOS SDK
         shell: bash
         run: |
-          echo "=========================================="
-          echo "macOS"
-          echo "=========================================="
+          echo "========== macOS =========="
           sw_vers
 
           echo ""
-          echo "=========================================="
-          echo "Xcode"
-          echo "=========================================="
+          echo "========== Xcode =========="
           xcodebuild -version
 
           echo ""
-          echo "=========================================="
-          echo "iOS SDK"
-          echo "=========================================="
+          echo "========== iOS SDK =========="
           xcrun --sdk iphoneos --show-sdk-version
 
       # -----------------------------------------------------
@@ -88,7 +81,7 @@ jobs:
         shell: bash
         run: |
           echo "=========================================="
-          echo "下载 Pure Live：${{ needs.prepare.outputs.tag }}"
+          echo "下载版本：${{ needs.prepare.outputs.tag }}"
           echo "=========================================="
 
           git clone \
@@ -98,8 +91,7 @@ jobs:
             source
 
       # -----------------------------------------------------
-      # 3. 安装最新 Flutter Stable
-      # 不再固定之前有问题的旧 Flutter
+      # 3. 安装 Flutter Stable
       # -----------------------------------------------------
       - name: 安装 Flutter Stable
         uses: subosito/flutter-action@v2
@@ -108,30 +100,81 @@ jobs:
           cache: true
 
       # -----------------------------------------------------
-      # 4. 查看 Flutter / Dart 环境
+      # 4. 查看 Flutter / Dart
       # -----------------------------------------------------
       - name: 查看 Flutter 和 Dart 版本
         shell: bash
         run: |
-          echo "=========================================="
-          echo "Flutter"
-          echo "=========================================="
+          echo "========== Flutter =========="
           flutter --version
 
           echo ""
-          echo "=========================================="
-          echo "Dart"
-          echo "=========================================="
+          echo "========== Dart =========="
           dart --version
 
           echo ""
-          echo "=========================================="
-          echo "Flutter Doctor"
-          echo "=========================================="
+          echo "========== Flutter Doctor =========="
           flutter doctor -v
 
       # -----------------------------------------------------
-      # 5. 下载 Pure Live Flutter 依赖
+      # 5. 修复 Pure Live 当前 file_picker 兼容问题
+      #
+      # 当前源码部分位置：
+      #
+      # FilePickerResult? result = await FilePicker.pickFiles(
+      #
+      # 在当前 iOS 构建环境会报：
+      #
+      # 'FilePickerResult' isn't a type
+      #
+      # 自动改为：
+      #
+      # final result = await FilePicker.pickFiles(
+      # -----------------------------------------------------
+      - name: 修复 FilePickerResult 编译错误
+        shell: bash
+        run: |
+          echo "=========================================="
+          echo "修复 FilePickerResult"
+          echo "=========================================="
+
+          echo "修改前找到的位置："
+
+          grep -RIn \
+            "FilePickerResult? result = await FilePicker.pickFiles" \
+            source/lib || true
+
+          find source/lib \
+            -type f \
+            -name "*.dart" \
+            -exec sed -i '' \
+            's/FilePickerResult? result = await FilePicker\.pickFiles(/final result = await FilePicker.pickFiles(/g' \
+            {} +
+
+          echo ""
+          echo "修改后继续检查："
+
+          REMAINING=$(grep -RIl \
+            "FilePickerResult? result = await FilePicker.pickFiles" \
+            source/lib || true)
+
+          if [ -n "$REMAINING" ]; then
+            echo "❌ 仍然存在没有修复的位置："
+            echo "$REMAINING"
+            exit 1
+          fi
+
+          echo "✅ FilePickerResult 修复完成"
+
+          echo ""
+          echo "当前 FilePicker.pickFiles 使用位置："
+
+          grep -RIn \
+            "final result = await FilePicker.pickFiles" \
+            source/lib || true
+
+      # -----------------------------------------------------
+      # 6. 获取 Flutter 依赖
       # -----------------------------------------------------
       - name: 获取 Flutter 依赖
         working-directory: source
@@ -140,21 +183,32 @@ jobs:
           flutter pub get
 
       # -----------------------------------------------------
-      # 6. 编译 iOS Runner.app
-      #
-      # 不进行苹果官方签名
-      # 编译完成以后自己封装成 IPA
+      # 7. 清理旧缓存
+      # -----------------------------------------------------
+      - name: 清理 Flutter 构建缓存
+        working-directory: source
+        shell: bash
+        run: |
+          flutter clean
+          flutter pub get
+
+      # -----------------------------------------------------
+      # 8. 编译无签名 iOS
       # -----------------------------------------------------
       - name: 编译无签名 iOS
         working-directory: source
         shell: bash
         run: |
+          echo "=========================================="
+          echo "开始编译 Pure Live iOS"
+          echo "=========================================="
+
           flutter build ios \
             --release \
             --no-codesign
 
       # -----------------------------------------------------
-      # 7. 检查 Runner.app 是否真正生成
+      # 9. 检查 Runner.app
       # -----------------------------------------------------
       - name: 检查 iOS 编译结果
         shell: bash
@@ -171,14 +225,10 @@ jobs:
           echo "✅ Runner.app 编译成功"
 
           echo ""
-          echo "Runner.app 大小："
           du -sh source/build/ios/iphoneos/Runner.app
 
       # -----------------------------------------------------
-      # 8. 制作普通无签名 IPA
-      #
-      # 这个版本保留 Pure Live 原本的 App Extension
-      # 后面可以用于其他自签方式
+      # 10. 制作普通无签名 IPA
       # -----------------------------------------------------
       - name: 制作普通 IPA
         shell: bash
@@ -209,11 +259,9 @@ jobs:
           echo "✅ 普通 IPA 制作完成"
 
       # -----------------------------------------------------
-      # 9. 制作 LiveContainer 专用 IPA
+      # 11. 制作 LiveContainer 专用 IPA
       #
-      # Pure Live 自带 ShareExtension。
-      # LiveContainer Guest App 不需要这个扩展，
-      # 所以这里自动删除 PlugIns。
+      # 删除 Guest App 里的 App Extensions
       # -----------------------------------------------------
       - name: 制作 LiveContainer IPA
         shell: bash
@@ -249,7 +297,7 @@ jobs:
           echo "✅ LiveContainer IPA 制作完成"
 
       # -----------------------------------------------------
-      # 10. 显示最终生成的 IPA
+      # 12. 显示 IPA
       # -----------------------------------------------------
       - name: 查看生成的 IPA
         shell: bash
@@ -261,10 +309,10 @@ jobs:
           ls -lh *.ipa
 
           echo ""
-          echo "✅ iOS 打包全部完成"
+          echo "✅ Pure Live iOS 打包完成"
 
       # -----------------------------------------------------
-      # 11. 上传到 GitHub Actions
+      # 13. 上传 IPA
       # -----------------------------------------------------
       - name: 上传 IPA
         uses: actions/upload-artifact@v4

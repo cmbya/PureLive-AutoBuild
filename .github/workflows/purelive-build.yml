@@ -607,7 +607,7 @@ jobs:
           import 'package:pure_live/model/live_category.dart';
           import 'package:pure_live/model/live_play_quality.dart';
 
-          class TwitchSite implements LiveSite {
+          class TwitchSite extends LiveSite {
             static const String platformId = 'twitch';
 
             @override

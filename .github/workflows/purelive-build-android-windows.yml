@@ -1,4 +1,4 @@
-name: Pure Live Android + Windows + Twitch + SOOP V5.4
+name: Pure Live Android + Windows + Twitch + SOOP V5.5
 
 on:
   workflow_dispatch:
@@ -122,17 +122,17 @@ jobs:
           cache: true
 
       # -----------------------------------------------------
-      # Pure Live 跨平台兼容修复
+      # Pure Live file_picker 12.x API 兼容
       #
-      # Pure 当前写的是：
-      #   file_picker: ^12.0.0-beta.5
+      # Pure 当前两处代码仍使用旧的：
+      #   FilePickerResult? result = await FilePicker.pickFiles(...)
       #
-      # 现在这个范围可能解析到正式版 12.0.0，
-      # 但正式版已经移除旧 FilePickerResult API。
-      # Pure 当前源码仍依赖 FilePickerResult，
-      # 所以 Android / Windows 都固定到 beta.5。
+      # file_picker 12.x 已提供单文件 API：
+      #   PlatformFile? result = await FilePicker.pickFile(...)
+      #
+      # 这里直接改源码，不再强行锁 beta 版本。
       # -----------------------------------------------------
-      - name: 修复跨平台依赖兼容
+      - name: 修复 Pure file_picker 12.x API
         shell: bash
         run: |
           set -e
@@ -140,24 +140,100 @@ jobs:
           python3 <<'PY'
           from pathlib import Path
 
-          path = Path("source/pubspec.yaml")
-          text = path.read_text(encoding="utf-8")
+          files = [
+              Path(
+                  "source/lib/core/iptv/services/"
+                  "epg_import_manager.dart"
+              ),
+              Path(
+                  "source/lib/plugins/"
+                  "backup_recovery_service.dart"
+              ),
+          ]
 
-          old = "file_picker: ^12.0.0-beta.5"
-          new = "file_picker: 12.0.0-beta.5"
+          for path in files:
+              if not path.exists():
+                  raise SystemExit(
+                      f"❌ 找不到文件：{path}"
+                  )
 
-          if old in text:
-              text = text.replace(old, new, 1)
-              print("✅ file_picker 固定为 12.0.0-beta.5")
-          elif new in text:
-              print("✅ file_picker 已经固定为 12.0.0-beta.5")
-          else:
-              raise SystemExit(
-                  "❌ Pure Live 的 file_picker 依赖结构变化，"
-                  "请先检查上游 pubspec.yaml"
+              text = path.read_text(
+                  encoding="utf-8"
               )
 
-          path.write_text(text, encoding="utf-8")
+              old_decl = (
+                  "FilePickerResult? result = "
+                  "await FilePicker.pickFiles("
+              )
+
+              new_decl = (
+                  "final result = "
+                  "await FilePicker.pickFile("
+              )
+
+              if old_decl in text:
+                  text = text.replace(
+                      old_decl,
+                      new_decl,
+                      1,
+                  )
+              elif new_decl not in text:
+                  raise SystemExit(
+                      f"❌ {path} 的 FilePicker "
+                      "代码结构已变化"
+                  )
+
+              # 旧 API:
+              # result == null || result.files.single.path == null
+              # 新 API:
+              # result?.path == null
+              text = text.replace(
+                  "result == null || "
+                  "result.files.single.path == null",
+                  "result?.path == null",
+              )
+
+              # 旧 API result.files.single.path!
+              # 新 API result!.path!
+              text = text.replace(
+                  "result.files.single.path!",
+                  "result!.path!",
+              )
+
+              path.write_text(
+                  text,
+                  encoding="utf-8",
+              )
+
+              print(
+                  f"✅ 已适配：{path}"
+              )
+
+          # 不能再有 FilePickerResult。
+          remaining = []
+
+          for path in Path("source/lib").rglob("*.dart"):
+              content = path.read_text(
+                  encoding="utf-8",
+                  errors="ignore",
+              )
+
+              if "FilePickerResult" in content:
+                  remaining.append(str(path))
+
+          if remaining:
+              print(
+                  "❌ 仍发现旧 FilePickerResult："
+              )
+
+              for item in remaining:
+                  print("  " + item)
+
+              raise SystemExit(1)
+
+          print(
+              "✅ Pure lib 内已无旧 FilePickerResult API"
+          )
           PY
 
       # -----------------------------------------------------
@@ -198,15 +274,12 @@ jobs:
           flutter pub get
 
           echo ""
-          echo "========== file_picker =========="
+          echo "========== file_picker 实际版本 =========="
           flutter pub deps | grep "file_picker" || true
 
-          if ! flutter pub deps | grep -q "file_picker 12.0.0-beta.5"; then
-            echo "❌ file_picker 没有锁定到 12.0.0-beta.5"
-            exit 1
-          fi
-
-          echo "✅ file_picker 版本正确"
+          echo ""
+          echo "✅ 不再强制降级 file_picker"
+          echo "✅ Pure 源码已适配 file_picker 12.x API"
 
       - name: 格式化修改文件
         working-directory: source
@@ -276,16 +349,16 @@ jobs:
           rm -f source/.flutter-plugins-dependencies
           rm -rf source/.git
 
-          tar -czf pure-source-v5.4.tar.gz source
+          tar -czf pure-source-v5.5.tar.gz source
 
-          ls -lh pure-source-v5.4.tar.gz
+          ls -lh pure-source-v5.5.tar.gz
 
       - name: 上传预检源码
         if: ${{ inputs.mode == 'build' }}
         uses: actions/upload-artifact@v4
         with:
-          name: PureLive-Twitch-SOOP-V5.4-Source-${{ needs.prepare.outputs.tag }}
-          path: pure-source-v5.4.tar.gz
+          name: PureLive-Twitch-SOOP-V5.5-Source-${{ needs.prepare.outputs.tag }}
+          path: pure-source-v5.5.tar.gz
           retention-days: 1
           if-no-files-found: error
 
@@ -321,7 +394,7 @@ jobs:
       - name: 下载预检源码
         uses: actions/download-artifact@v4
         with:
-          name: PureLive-Twitch-SOOP-V5.4-Source-${{ needs.prepare.outputs.tag }}
+          name: PureLive-Twitch-SOOP-V5.5-Source-${{ needs.prepare.outputs.tag }}
           path: prevalidated
 
       - name: 解压源码
@@ -330,7 +403,7 @@ jobs:
           set -e
 
           tar -xzf \
-            prevalidated/pure-source-v5.4.tar.gz
+            prevalidated/pure-source-v5.5.tar.gz
 
           test -f source/lib/core/site/twitch_site.dart
           test -f source/lib/core/site/soop_site.dart
@@ -515,7 +588,7 @@ jobs:
             fi
 
             cp "$APK" \
-              "release-android/PureLive-${VERSION}-Twitch-SOOP-V5.4-Android-${FOUND}.apk"
+              "release-android/PureLive-${VERSION}-Twitch-SOOP-V5.5-Android-${FOUND}.apk"
           done
 
           echo "========== Android APK =========="
@@ -524,7 +597,7 @@ jobs:
       - name: 上传 Android APK
         uses: actions/upload-artifact@v4
         with:
-          name: PureLive-Twitch-SOOP-V5.4-Android-${{ needs.prepare.outputs.tag }}
+          name: PureLive-Twitch-SOOP-V5.5-Android-${{ needs.prepare.outputs.tag }}
           path: source/release-android/*.apk
           retention-days: 7
           if-no-files-found: error
@@ -556,14 +629,14 @@ jobs:
       - name: 下载预检源码
         uses: actions/download-artifact@v4
         with:
-          name: PureLive-Twitch-SOOP-V5.4-Source-${{ needs.prepare.outputs.tag }}
+          name: PureLive-Twitch-SOOP-V5.5-Source-${{ needs.prepare.outputs.tag }}
           path: prevalidated
 
       - name: 解压源码
         shell: pwsh
         run: |
           tar -xzf `
-            "prevalidated/pure-source-v5.4.tar.gz"
+            "prevalidated/pure-source-v5.5.tar.gz"
 
           if (-not (Test-Path "source/lib/core/site/twitch_site.dart")) {
             throw "TwitchSite 不存在"
@@ -759,7 +832,7 @@ jobs:
 
           Copy-Item `
             $exe.FullName `
-            "release-windows\PureLive-$VERSION-Twitch-SOOP-V5.4-Windows-x64-Setup.exe" `
+            "release-windows\PureLive-$VERSION-Twitch-SOOP-V5.5-Windows-x64-Setup.exe" `
             -Force
 
           $zip = Get-ChildItem `
@@ -774,7 +847,7 @@ jobs:
 
           Copy-Item `
             $zip.FullName `
-            "release-windows\PureLive-$VERSION-Twitch-SOOP-V5.4-Windows-x64-Portable.zip" `
+            "release-windows\PureLive-$VERSION-Twitch-SOOP-V5.5-Windows-x64-Portable.zip" `
             -Force
 
           Write-Host "========== Windows Release =========="
@@ -788,7 +861,7 @@ jobs:
       - name: 上传 Windows EXE + ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: PureLive-Twitch-SOOP-V5.4-Windows-${{ needs.prepare.outputs.tag }}
+          name: PureLive-Twitch-SOOP-V5.5-Windows-${{ needs.prepare.outputs.tag }}
           path: |
             source/release-windows/*.exe
             source/release-windows/*.zip

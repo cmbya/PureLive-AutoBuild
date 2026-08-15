@@ -83,7 +83,7 @@ class SoopSite extends LiveSite {
   }
 
   String get _savedCookie =>
-      SettingsService.to.cookieManager.soopCookie.v.trim();
+      SettingsService.to.cookieManager.soopCookie.value.trim();
 
   Map<String, String> _headers({
     String roomId = '',

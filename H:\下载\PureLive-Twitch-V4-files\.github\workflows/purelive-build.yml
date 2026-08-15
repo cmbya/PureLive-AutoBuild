@@ -1,0 +1,341 @@
+name: Pure Live iOS + Twitch V4
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "第一次选 check；检查全绿后再选 build"
+        required: true
+        default: "check"
+        type: choice
+        options:
+          - check
+          - build
+      version:
+        description: "Pure Live 版本：latest 或 v2.0.23"
+        required: true
+        default: "latest"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: "3.47.0"
+
+jobs:
+  prepare:
+    name: 获取 Pure Live 版本
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+
+    steps:
+      - name: 获取版本
+        id: version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+
+          if [ "${{ inputs.version }}" = "latest" ]; then
+            TAG=$(gh api repos/liuchuancong/pure_live/releases/latest --jq '.tag_name')
+          else
+            TAG="${{ inputs.version }}"
+          fi
+
+          echo "Pure Live：$TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  preflight:
+    name: Twitch 完整预检
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 下载 AutoBuild 文件
+        uses: actions/checkout@v4
+
+      - name: 下载 Pure Live
+        shell: bash
+        run: |
+          set -e
+
+          git clone \
+            --depth 1 \
+            --branch "${{ needs.prepare.outputs.tag }}" \
+            https://github.com/liuchuancong/pure_live.git \
+            source
+
+      - name: Twitch 真实网络预检
+        shell: bash
+        run: |
+          set -e
+
+          python3 scripts/preflight_twitch.py \
+            --hash-output twitch_hashes.json
+
+      - name: 安装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: 关闭 Swift Package Manager
+        shell: bash
+        run: |
+          flutter config --no-enable-swift-package-manager
+
+      - name: 修复 Pure Live iOS
+        shell: bash
+        run: |
+          set -e
+          python3 scripts/patch_pure_ios.py source
+
+      - name: 注入 Twitch V4
+        shell: bash
+        run: |
+          set -e
+
+          python3 scripts/patch_twitch.py source \
+            --hashes twitch_hashes.json \
+            --template patches/twitch_site.dart.tpl
+
+      - name: 获取 Flutter 依赖
+        working-directory: source
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf .dart_tool build
+          rm -rf ios/Pods ios/.symlinks
+          rm -f ios/Podfile.lock
+          rm -f .flutter-plugins-dependencies
+
+          flutter clean
+          flutter pub get
+
+          echo ""
+          echo "========== file_picker =========="
+          flutter pub deps | grep "file_picker" || true
+
+          echo ""
+          echo "========== share_handler =========="
+
+          if flutter pub deps | grep -q "share_handler"; then
+            echo "❌ share_handler 仍存在"
+            flutter pub deps | grep "share_handler"
+            exit 1
+          else
+            echo "✅ share_handler 已移除"
+          fi
+
+      - name: 格式化修改文件
+        working-directory: source
+        shell: bash
+        run: |
+          set -e
+
+          dart format \
+            lib/core/site/twitch_site.dart \
+            lib/core/sites.dart \
+            lib/common/utils/live_url_tool.dart \
+            lib/modules/toolbox/toolbox_controller.dart \
+            lib/modules/search/search_controller.dart \
+            lib/modules/live_play/controllers/live_play_controller.dart \
+            lib/modules/live_play/controllers/player_controller.dart
+
+      - name: Dart 静态检查
+        working-directory: source
+        shell: bash
+        run: |
+          set -e
+
+          dart analyze \
+            --no-fatal-warnings \
+            --no-fatal-infos \
+            lib/core/site/twitch_site.dart \
+            lib/core/sites.dart \
+            lib/common/utils/live_url_tool.dart \
+            lib/modules/toolbox/toolbox_controller.dart \
+            lib/modules/search/search_controller.dart \
+            lib/modules/live_play/controllers/live_play_controller.dart \
+            lib/modules/live_play/controllers/player_controller.dart
+
+      - name: Check 模式结果
+        if: ${{ inputs.mode == 'check' }}
+        shell: bash
+        run: |
+          echo "======================================"
+          echo "✅ Twitch 网络请求通过"
+          echo "✅ Twitch 分区通过"
+          echo "✅ Twitch 分类直播通过"
+          echo "✅ Twitch 主播详情通过"
+          echo "✅ Twitch Playback Token 通过"
+          echo "✅ Twitch M3U8 / 清晰度通过"
+          echo "✅ Dart 静态检查通过"
+          echo ""
+          echo "本次为 check：不会启动 macOS，不会编译 IPA。"
+          echo "下一次 Run workflow 选择 build 即可。"
+          echo "======================================"
+
+      - name: 准备 Build 源码
+        if: ${{ inputs.mode == 'build' }}
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf source/.dart_tool
+          rm -rf source/build
+          rm -rf source/ios/Pods
+          rm -rf source/ios/.symlinks
+          rm -f source/ios/Podfile.lock
+          rm -f source/.flutter-plugins-dependencies
+          rm -rf source/.git
+
+          tar -czf pure-source-v4.tar.gz source
+
+      - name: 上传已通过预检的源码
+        if: ${{ inputs.mode == 'build' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: PureLive-Twitch-V4-Source-${{ needs.prepare.outputs.tag }}
+          path: pure-source-v4.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  build-ios:
+    name: 编译 iOS IPA
+    if: ${{ inputs.mode == 'build' }}
+    needs:
+      - prepare
+      - preflight
+    runs-on: macos-26
+    timeout-minutes: 120
+
+    steps:
+      - name: 下载已通过预检的源码
+        uses: actions/download-artifact@v4
+        with:
+          name: PureLive-Twitch-V4-Source-${{ needs.prepare.outputs.tag }}
+          path: prevalidated
+
+      - name: 解压源码
+        shell: bash
+        run: |
+          set -e
+
+          tar -xzf prevalidated/pure-source-v4.tar.gz
+          test -f source/lib/core/site/twitch_site.dart
+
+      - name: 安装 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: 查看编译环境
+        shell: bash
+        run: |
+          flutter --version
+          dart --version
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: 关闭 Swift Package Manager
+        shell: bash
+        run: |
+          flutter config --no-enable-swift-package-manager
+
+      - name: 获取 Flutter 依赖
+        working-directory: source
+        shell: bash
+        run: |
+          set -e
+          flutter clean
+          flutter pub get
+
+      - name: 安装 CocoaPods
+        working-directory: source/ios
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf Pods .symlinks
+          rm -f Podfile.lock
+          pod install --repo-update
+
+      - name: 检查 Xcode 工程
+        shell: bash
+        run: |
+          set -e
+
+          xcodebuild \
+            -project source/ios/Runner.xcodeproj \
+            -list
+
+      - name: 编译无签名 iOS
+        working-directory: source
+        shell: bash
+        run: |
+          set -e
+
+          flutter build ios \
+            --release \
+            --no-codesign \
+            --no-pub
+
+      - name: 检查 Runner.app
+        shell: bash
+        run: |
+          set -e
+
+          APP="source/build/ios/iphoneos/Runner.app"
+
+          if [ ! -d "$APP" ]; then
+            echo "❌ Runner.app 不存在"
+            exit 1
+          fi
+
+          echo "✅ Runner.app 编译成功"
+          du -sh "$APP"
+
+      - name: 制作 LiveContainer IPA
+        shell: bash
+        run: |
+          set -e
+
+          TAG="${{ needs.prepare.outputs.tag }}"
+          VERSION="${TAG#v}"
+
+          rm -rf ipa
+          mkdir -p ipa/Payload
+
+          cp -R \
+            source/build/ios/iphoneos/Runner.app \
+            ipa/Payload/
+
+          rm -rf ipa/Payload/Runner.app/PlugIns
+
+          cd ipa
+
+          zip -qry \
+            "../PureLive-${VERSION}-Twitch-V4-iOS-LiveContainer.ipa" \
+            Payload
+
+          cd ..
+
+          ls -lh \
+            PureLive-*-Twitch-V4-iOS-LiveContainer.ipa
+
+      - name: 上传 IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: PureLive-Twitch-V4-iOS-${{ needs.prepare.outputs.tag }}
+          path: PureLive-*-Twitch-V4-iOS-LiveContainer.ipa
+          retention-days: 7
+          if-no-files-found: error

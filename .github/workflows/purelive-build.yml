@@ -45,20 +45,17 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
   # =========================================================
-  # 2. 编译 iOS
+  # 2. 编译 iOS IPA
   # =========================================================
   build-ios:
     name: 编译 iOS IPA
     needs: prepare
-
-    # 使用新版 Xcode / iOS SDK
     runs-on: macos-26
-
     timeout-minutes: 120
 
     steps:
       # -----------------------------------------------------
-      # 1. 查看系统环境
+      # 1. 查看 Xcode / iOS SDK
       # -----------------------------------------------------
       - name: 查看 Xcode 和 iOS SDK
         shell: bash
@@ -81,7 +78,7 @@ jobs:
         shell: bash
         run: |
           echo "=========================================="
-          echo "下载版本：${{ needs.prepare.outputs.tag }}"
+          echo "下载 Pure Live：${{ needs.prepare.outputs.tag }}"
           echo "=========================================="
 
           git clone \
@@ -91,7 +88,46 @@ jobs:
             source
 
       # -----------------------------------------------------
-      # 3. 安装 Flutter Stable
+      # 3. 修复 Pure Live v2.0.23 的 file_picker 依赖
+      #
+      # Pure Live 源码使用的是旧的 FilePickerResult API。
+      # ^12.0.0-beta.5 现在可能升级到新的正式版 12.x，
+      # 因此这里自动锁定到 12.0.0-beta.5。
+      # -----------------------------------------------------
+      - name: 固定 file_picker 兼容版本
+        shell: bash
+        run: |
+          echo "=========================================="
+          echo "检查 file_picker"
+          echo "=========================================="
+
+          grep -n "file_picker:" source/pubspec.yaml || true
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path("source/pubspec.yaml")
+          text = path.read_text(encoding="utf-8")
+
+          old = "file_picker: ^12.0.0-beta.5"
+          new = "file_picker: 12.0.0-beta.5"
+
+          if old in text:
+              text = text.replace(old, new)
+              path.write_text(text, encoding="utf-8")
+              print("✅ 已将 file_picker 锁定为 12.0.0-beta.5")
+          elif new in text:
+              print("✅ file_picker 已经是 12.0.0-beta.5")
+          else:
+              print("ℹ️ 当前上游已经修改 file_picker 配置，不强制修改")
+          PY
+
+          echo ""
+          echo "修改后："
+          grep -n "file_picker:" source/pubspec.yaml || true
+
+      # -----------------------------------------------------
+      # 4. 安装 Flutter Stable
       # -----------------------------------------------------
       - name: 安装 Flutter Stable
         uses: subosito/flutter-action@v2
@@ -100,7 +136,7 @@ jobs:
           cache: true
 
       # -----------------------------------------------------
-      # 4. 查看 Flutter / Dart
+      # 5. 查看 Flutter / Dart
       # -----------------------------------------------------
       - name: 查看 Flutter 和 Dart 版本
         shell: bash
@@ -117,83 +153,24 @@ jobs:
           flutter doctor -v
 
       # -----------------------------------------------------
-      # 5. 修复 Pure Live 当前 file_picker 兼容问题
-      #
-      # 当前源码部分位置：
-      #
-      # FilePickerResult? result = await FilePicker.pickFiles(
-      #
-      # 在当前 iOS 构建环境会报：
-      #
-      # 'FilePickerResult' isn't a type
-      #
-      # 自动改为：
-      #
-      # final result = await FilePicker.pickFiles(
-      # -----------------------------------------------------
-      - name: 修复 FilePickerResult 编译错误
-        shell: bash
-        run: |
-          echo "=========================================="
-          echo "修复 FilePickerResult"
-          echo "=========================================="
-
-          echo "修改前找到的位置："
-
-          grep -RIn \
-            "FilePickerResult? result = await FilePicker.pickFiles" \
-            source/lib || true
-
-          find source/lib \
-            -type f \
-            -name "*.dart" \
-            -exec sed -i '' \
-            's/FilePickerResult? result = await FilePicker\.pickFiles(/final result = await FilePicker.pickFiles(/g' \
-            {} +
-
-          echo ""
-          echo "修改后继续检查："
-
-          REMAINING=$(grep -RIl \
-            "FilePickerResult? result = await FilePicker.pickFiles" \
-            source/lib || true)
-
-          if [ -n "$REMAINING" ]; then
-            echo "❌ 仍然存在没有修复的位置："
-            echo "$REMAINING"
-            exit 1
-          fi
-
-          echo "✅ FilePickerResult 修复完成"
-
-          echo ""
-          echo "当前 FilePicker.pickFiles 使用位置："
-
-          grep -RIn \
-            "final result = await FilePicker.pickFiles" \
-            source/lib || true
-
-      # -----------------------------------------------------
-      # 6. 获取 Flutter 依赖
+      # 6. 清理并获取依赖
       # -----------------------------------------------------
       - name: 获取 Flutter 依赖
-        working-directory: source
-        shell: bash
-        run: |
-          flutter pub get
-
-      # -----------------------------------------------------
-      # 7. 清理旧缓存
-      # -----------------------------------------------------
-      - name: 清理 Flutter 构建缓存
         working-directory: source
         shell: bash
         run: |
           flutter clean
           flutter pub get
 
+          echo ""
+          echo "=========================================="
+          echo "检查最终 file_picker 版本"
+          echo "=========================================="
+
+          flutter pub deps | grep -E "file_picker|file_picker_platform" || true
+
       # -----------------------------------------------------
-      # 8. 编译无签名 iOS
+      # 7. 编译无签名 iOS
       # -----------------------------------------------------
       - name: 编译无签名 iOS
         working-directory: source
@@ -208,7 +185,7 @@ jobs:
             --no-codesign
 
       # -----------------------------------------------------
-      # 9. 检查 Runner.app
+      # 8. 检查 Runner.app
       # -----------------------------------------------------
       - name: 检查 iOS 编译结果
         shell: bash
@@ -225,10 +202,11 @@ jobs:
           echo "✅ Runner.app 编译成功"
 
           echo ""
+          echo "Runner.app 大小："
           du -sh source/build/ios/iphoneos/Runner.app
 
       # -----------------------------------------------------
-      # 10. 制作普通无签名 IPA
+      # 9. 制作普通无签名 IPA
       # -----------------------------------------------------
       - name: 制作普通 IPA
         shell: bash
@@ -259,9 +237,10 @@ jobs:
           echo "✅ 普通 IPA 制作完成"
 
       # -----------------------------------------------------
-      # 11. 制作 LiveContainer 专用 IPA
+      # 10. 制作 LiveContainer 专用 IPA
       #
-      # 删除 Guest App 里的 App Extensions
+      # 删除 Pure Live 的 App Extension，
+      # 避免 Guest App 扩展影响 LiveContainer。
       # -----------------------------------------------------
       - name: 制作 LiveContainer IPA
         shell: bash
@@ -297,7 +276,7 @@ jobs:
           echo "✅ LiveContainer IPA 制作完成"
 
       # -----------------------------------------------------
-      # 12. 显示 IPA
+      # 11. 查看最终 IPA
       # -----------------------------------------------------
       - name: 查看生成的 IPA
         shell: bash
@@ -309,10 +288,10 @@ jobs:
           ls -lh *.ipa
 
           echo ""
-          echo "✅ Pure Live iOS 打包完成"
+          echo "✅ Pure Live iOS 打包全部完成"
 
       # -----------------------------------------------------
-      # 13. 上传 IPA
+      # 12. 上传 IPA
       # -----------------------------------------------------
       - name: 上传 IPA
         uses: actions/upload-artifact@v4

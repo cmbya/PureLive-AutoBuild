@@ -843,7 +843,9 @@ jobs:
               int page,
               int pageSize,
             ) async {
-              final first = _safePageSize(pageSize);
+              // Pure 的分区页会传入 pageSize=1000。
+              // 与 simp 的实现保持一致，Twitch 热门分类固定取 20 个。
+              const first = 20;
 
               final query = {
                 'query':
@@ -1400,6 +1402,99 @@ jobs:
           print("✅ Twitch 已注册到 Sites.supportSites")
           PY
 
+          # ---------------------------------------------------
+          # 让 Pure 的“直播间跳转 / 获取直链”支持 Twitch 链接
+          # ---------------------------------------------------
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path("source/lib/common/utils/live_url_tool.dart")
+          text = path.read_text(encoding="utf-8")
+
+          if 'Sites.twitchSite' not in text:
+              marker = "    // 网易CC\n"
+
+              if marker not in text:
+                  raise SystemExit(
+                      "❌ LiveUrlTool 结构变化，找不到 Twitch 解析插入位置"
+                  )
+
+              twitch_block = r"""    // Twitch
+    if (realUrl.contains("twitch.tv")) {
+      try {
+        realUrl = realUrl.split("?").first.trimEndChar('/');
+        final uri = Uri.parse(realUrl);
+        final host = uri.host.toLowerCase();
+
+        if (host != "twitch.tv" &&
+            host != "www.twitch.tv" &&
+            host != "m.twitch.tv") {
+          return [];
+        }
+
+        final segments =
+            uri.pathSegments.where((e) => e.trim().isNotEmpty).toList();
+
+        if (segments.isEmpty) {
+          return [];
+        }
+
+        final id = segments.first.trim();
+
+        const reservedPaths = {
+          "directory",
+          "downloads",
+          "videos",
+          "settings",
+          "subscriptions",
+          "inventory",
+          "wallet",
+          "search",
+        };
+
+        if (id.isEmpty || reservedPaths.contains(id.toLowerCase())) {
+          return [];
+        }
+
+        return [id, Sites.twitchSite];
+      } catch (_) {
+        return [];
+      }
+    }
+
+"""
+
+              text = text.replace(marker, twitch_block + marker, 1)
+              path.write_text(text, encoding="utf-8")
+              print("✅ LiveUrlTool 已支持 Twitch 主播链接")
+          else:
+              print("✅ LiveUrlTool 已包含 Twitch 解析")
+          PY
+
+          # ---------------------------------------------------
+          # 剪贴板自动识别加入 twitch.tv
+          # ---------------------------------------------------
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path("source/lib/modules/toolbox/toolbox_controller.dart")
+          text = path.read_text(encoding="utf-8")
+
+          old = 'RegExp(r"bilibili|huya|douyu|douyin|kuaishou|163").hasMatch(text)'
+          new = 'RegExp(r"bilibili|huya|douyu|douyin|kuaishou|163|twitch\\.tv", caseSensitive: false).hasMatch(text)'
+
+          if old in text:
+              text = text.replace(old, new, 1)
+              path.write_text(text, encoding="utf-8")
+              print("✅ 剪贴板自动检测已支持 Twitch")
+          elif "twitch\\.tv" in text:
+              print("✅ 剪贴板自动检测已经支持 Twitch")
+          else:
+              raise SystemExit(
+                  "❌ toolbox_controller.dart 结构变化，无法自动加入 Twitch"
+              )
+          PY
+
           echo ""
           echo "========== Twitch 文件 =========="
           ls -lh \
@@ -1478,7 +1573,9 @@ jobs:
           dart analyze \
             lib/core/site/twitch_site.dart \
             lib/core/danmaku/twitch_danmaku.dart \
-            lib/core/sites.dart
+            lib/core/sites.dart \
+            lib/common/utils/live_url_tool.dart \
+            lib/modules/toolbox/toolbox_controller.dart
 
       # =====================================================
       # CocoaPods

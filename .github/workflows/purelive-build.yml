@@ -1,37 +1,46 @@
-name: Pure Live iOS + Twitch + SOOP V5.1 Auth
+name: Pure Live 每日自动更新 - iOS
 
 on:
+  schedule:
+    - cron: "17 10 * * *"
+      timezone: "Asia/Shanghai"
+
   workflow_dispatch:
     inputs:
-      mode:
-        description: "第一次选 check；检查全绿后再选 build"
-        required: true
-        default: "check"
-        type: choice
-        options:
-          - check
-          - build
       version:
-        description: "Pure Live 版本：latest 或 v2.0.23"
+        description: "Pure Live 版本：latest 或指定版本，例如 v2.0.18"
         required: true
         default: "latest"
         type: string
 
+      force_build:
+        description: "即使这个版本已经编译过，也强制重新编译"
+        required: true
+        default: false
+        type: boolean
+
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: purelive-ios-daily-autobuild
+  cancel-in-progress: false
 
 env:
   FLUTTER_VERSION: "3.47.0"
 
 jobs:
   prepare:
-    name: 获取 Pure Live 版本
+    name: 每日检查 Pure Live 更新
     runs-on: ubuntu-latest
+
     outputs:
       tag: ${{ steps.version.outputs.tag }}
+      marker: ${{ steps.version.outputs.marker }}
+      should_build: ${{ steps.version.outputs.should_build }}
 
     steps:
-      - name: 获取版本
+      - name: 检查最新版本
         id: version
         shell: bash
         env:
@@ -39,16 +48,67 @@ jobs:
         run: |
           set -e
 
-          if [ "${{ inputs.version }}" = "latest" ]; then
-            TAG=$(gh api repos/liuchuancong/pure_live/releases/latest --jq '.tag_name')
+          # schedule 没有 inputs；定时任务始终检查 latest。
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            REQUESTED="${{ inputs.version }}"
+            FORCE="${{ inputs.force_build }}"
           else
-            TAG="${{ inputs.version }}"
+            REQUESTED="latest"
+            FORCE="false"
           fi
 
-          echo "Pure Live：$TAG"
+          if [ "$REQUESTED" = "latest" ]; then
+            TAG=$(gh api               repos/liuchuancong/pure_live/releases/latest               --jq '.tag_name')
+          else
+            TAG="$REQUESTED"
+          fi
+
+          MARKER="autobuild-ios-${TAG}"
+
+          echo "======================================"
+          echo "Pure Live 最新版本：$TAG"
+          echo "自动构建标记：$MARKER"
+          echo "======================================"
+
+          SHOULD_BUILD="true"
+
+          if [ "$FORCE" != "true" ]; then
+            if gh api               "repos/${{ github.repository }}/git/ref/tags/$MARKER"               >/dev/null 2>&1; then
+
+              SHOULD_BUILD="false"
+
+              echo ""
+              echo "✅ $TAG 已经成功编译过"
+              echo "今天只检测，不重复编译。"
+            else
+              echo ""
+              echo "🆕 检测到尚未编译的新版本：$TAG"
+            fi
+          else
+            echo ""
+            echo "⚠️ 手动启用了 force_build：强制重新编译 $TAG"
+          fi
+
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "marker=$MARKER" >> "$GITHUB_OUTPUT"
+          echo "should_build=$SHOULD_BUILD" >> "$GITHUB_OUTPUT"
+
+  no-update:
+    name: 没有更新
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_build != 'true' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 今日无需编译
+        shell: bash
+        run: |
+          echo "✅ Pure Live 当前仍是 ${{ needs.prepare.outputs.tag }}"
+          echo "✅ 这个版本已经编译完成"
+          echo "✅ 今日不启动昂贵的编译 Runner"
 
   preflight:
+    if: ${{ needs.prepare.outputs.should_build == 'true' }}
     name: Twitch + SOOP 完整预检
     needs: prepare
     runs-on: ubuntu-latest
@@ -188,28 +248,7 @@ jobs:
             lib/modules/live_play/controllers/live_play_controller.dart \
             lib/modules/live_play/controllers/player_controller.dart
 
-      - name: Check 模式结果
-        if: ${{ inputs.mode == 'check' }}
-        shell: bash
-        run: |
-          echo "======================================"
-          echo "✅ Twitch 网络请求通过"
-          echo "✅ Twitch 分区通过"
-          echo "✅ Twitch 分类直播通过"
-          echo "✅ Twitch 主播详情通过"
-          echo "✅ Twitch Playback Token 通过"
-          echo "✅ Twitch M3U8 / 清晰度通过"
-          echo "✅ SOOP 热门 / 分区通过"
-          echo "✅ SOOP 房间信息 / AID / CDN 通过"
-          echo "✅ SOOP HTTPS M3U8 / 实际媒体分片通过"
-          echo "✅ Dart 静态检查通过"
-          echo ""
-          echo "本次为 check：不会启动 macOS，不会编译 IPA。"
-          echo "下一次 Run workflow 选择 build 即可。"
-          echo "======================================"
-
       - name: 准备 Build 源码
-        if: ${{ inputs.mode == 'build' }}
         shell: bash
         run: |
           set -e
@@ -225,17 +264,16 @@ jobs:
           tar -czf pure-source-v5.tar.gz source
 
       - name: 上传已通过预检的源码
-        if: ${{ inputs.mode == 'build' }}
         uses: actions/upload-artifact@v4
         with:
-          name: PureLive-Twitch-SOOP-V5-Source-${{ needs.prepare.outputs.tag }}
+          name: PureLive-Twitch-SOOP-V5.3-Source-${{ needs.prepare.outputs.tag }}
           path: pure-source-v5.tar.gz
           retention-days: 1
           if-no-files-found: error
 
   build-ios:
     name: 编译 iOS IPA
-    if: ${{ inputs.mode == 'build' }}
+    if: ${{ needs.prepare.outputs.should_build == 'true' }}
     needs:
       - prepare
       - preflight
@@ -246,7 +284,7 @@ jobs:
       - name: 下载已通过预检的源码
         uses: actions/download-artifact@v4
         with:
-          name: PureLive-Twitch-SOOP-V5-Source-${{ needs.prepare.outputs.tag }}
+          name: PureLive-Twitch-SOOP-V5.3-Source-${{ needs.prepare.outputs.tag }}
           path: prevalidated
 
       - name: 解压源码
@@ -351,18 +389,63 @@ jobs:
           cd ipa
 
           zip -qry \
-            "../PureLive-${VERSION}-Twitch-SOOP-V5-iOS-LiveContainer.ipa" \
+            "../PureLive-${VERSION}-Twitch-SOOP-V5.3-iOS-LiveContainer.ipa" \
             Payload
 
           cd ..
 
           ls -lh \
-            PureLive-*-Twitch-SOOP-V5-iOS-LiveContainer.ipa
+            PureLive-*-Twitch-SOOP-V5.3-iOS-LiveContainer.ipa
 
       - name: 上传 IPA
         uses: actions/upload-artifact@v4
         with:
-          name: PureLive-Twitch-SOOP-V5-iOS-${{ needs.prepare.outputs.tag }}
-          path: PureLive-*-Twitch-SOOP-V5-iOS-LiveContainer.ipa
-          retention-days: 7
+          name: PureLive-Twitch-SOOP-V5.3-iOS-${{ needs.prepare.outputs.tag }}
+          path: PureLive-*-Twitch-SOOP-V5.3-iOS-LiveContainer.ipa
+          retention-days: 30
           if-no-files-found: error
+
+  mark-built:
+    name: 记录已编译版本
+    needs:
+      - prepare
+      - build-ios
+    if: ${{ needs.prepare.outputs.should_build == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 签出 AutoBuild 仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 创建成功标记 Tag
+        shell: bash
+        run: |
+          set -e
+
+          MARKER="${{ needs.prepare.outputs.marker }}"
+          VERSION="${{ needs.prepare.outputs.tag }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote             --exit-code             --tags origin             "refs/tags/$MARKER"             >/dev/null 2>&1; then
+
+            echo "ℹ️ 标记已经存在：$MARKER"
+            echo "本次属于强制重新编译，不重复创建 Tag."
+          else
+            git tag               -a "$MARKER"               -m "iOS 自动构建成功 - Pure Live $VERSION"
+
+            git push origin "$MARKER"
+
+            echo "✅ 已创建成功标记：$MARKER"
+          fi
+
+          echo ""
+          echo "======================================"
+          echo "✅ Pure Live $VERSION 自动编译完成"
+          echo "✅ 下次每日检测会自动跳过该版本"
+          echo "======================================"

@@ -1,35 +1,30 @@
-name: Pure Live Android + Windows + Twitch + SOOP V5.6
+name: Pure Live 每日自动更新 - Android + Windows
 
 on:
+  schedule:
+    - cron: "37 10 * * *"
+      timezone: "Asia/Shanghai"
+
   workflow_dispatch:
     inputs:
-      mode:
-        description: "第一次可选 check；确认通过后选 build"
-        required: true
-        default: "build"
-        type: choice
-        options:
-          - check
-          - build
-
-      target:
-        description: "要编译的平台"
-        required: true
-        default: "all"
-        type: choice
-        options:
-          - all
-          - android
-          - windows
-
       version:
-        description: "Pure Live 版本：latest 或 v2.0.23"
+        description: "Pure Live 版本：latest 或指定版本，例如 v2.0.18"
         required: true
         default: "latest"
         type: string
 
+      force_build:
+        description: "即使这个版本已经编译过，也强制重新编译"
+        required: true
+        default: false
+        type: boolean
+
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: purelive-android-windows-daily-autobuild
+  cancel-in-progress: false
 
 env:
   FLUTTER_VERSION: "3.47.0"
@@ -39,14 +34,16 @@ jobs:
   # 1. 获取 Pure Live 版本
   # =========================================================
   prepare:
-    name: 获取 Pure Live 版本
+    name: 每日检查 Pure Live 更新
     runs-on: ubuntu-latest
 
     outputs:
       tag: ${{ steps.version.outputs.tag }}
+      marker: ${{ steps.version.outputs.marker }}
+      should_build: ${{ steps.version.outputs.should_build }}
 
     steps:
-      - name: 获取版本
+      - name: 检查最新版本
         id: version
         shell: bash
         env:
@@ -54,25 +51,67 @@ jobs:
         run: |
           set -e
 
-          if [ "${{ inputs.version }}" = "latest" ]; then
-            TAG=$(gh api \
-              repos/liuchuancong/pure_live/releases/latest \
-              --jq '.tag_name')
+          # schedule 没有 inputs；定时任务始终检查 latest。
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            REQUESTED="${{ inputs.version }}"
+            FORCE="${{ inputs.force_build }}"
           else
-            TAG="${{ inputs.version }}"
+            REQUESTED="latest"
+            FORCE="false"
           fi
 
-          echo "Pure Live：$TAG"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if [ "$REQUESTED" = "latest" ]; then
+            TAG=$(gh api               repos/liuchuancong/pure_live/releases/latest               --jq '.tag_name')
+          else
+            TAG="$REQUESTED"
+          fi
 
-  # =========================================================
-  # 2. Twitch + SOOP 预检，并生成已经打好补丁的源码
-  #
-  # 注意：
-  # Android / Windows 不运行 patch_pure_ios.py。
-  # 保留 Pure 原本的 share_handler 和各平台原生功能。
-  # =========================================================
+          MARKER="autobuild-aw-${TAG}"
+
+          echo "======================================"
+          echo "Pure Live 最新版本：$TAG"
+          echo "自动构建标记：$MARKER"
+          echo "======================================"
+
+          SHOULD_BUILD="true"
+
+          if [ "$FORCE" != "true" ]; then
+            if gh api               "repos/${{ github.repository }}/git/ref/tags/$MARKER"               >/dev/null 2>&1; then
+
+              SHOULD_BUILD="false"
+
+              echo ""
+              echo "✅ $TAG 已经成功编译过"
+              echo "今天只检测，不重复编译。"
+            else
+              echo ""
+              echo "🆕 检测到尚未编译的新版本：$TAG"
+            fi
+          else
+            echo ""
+            echo "⚠️ 手动启用了 force_build：强制重新编译 $TAG"
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "marker=$MARKER" >> "$GITHUB_OUTPUT"
+          echo "should_build=$SHOULD_BUILD" >> "$GITHUB_OUTPUT"
+
+  no-update:
+    name: 没有更新
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_build != 'true' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 今日无需编译
+        shell: bash
+        run: |
+          echo "✅ Pure Live 当前仍是 ${{ needs.prepare.outputs.tag }}"
+          echo "✅ 这个版本已经编译完成"
+          echo "✅ 今日不启动昂贵的编译 Runner"
+
   preflight:
+    if: ${{ needs.prepare.outputs.should_build == 'true' }}
     name: Twitch + SOOP 完整预检
     needs: prepare
     runs-on: ubuntu-latest
@@ -365,24 +404,7 @@ jobs:
             lib/core/iptv/services/iptv_import_manager.dart \
             lib/plugins/backup_recovery_service.dart
 
-      - name: Check 模式结果
-        if: ${{ inputs.mode == 'check' }}
-        shell: bash
-        run: |
-          echo "======================================"
-          echo "✅ Twitch 预检通过"
-          echo "✅ SOOP 预检通过"
-          echo "✅ Twitch + SOOP 补丁注入通过"
-          echo "✅ Dart 静态检查通过"
-          echo ""
-          echo "当前是 check 模式，不编译 Android / Windows。"
-          echo "======================================"
-
-      # -----------------------------------------------------
-      # build 模式才上传预检后的源码
-      # -----------------------------------------------------
       - name: 准备跨平台源码包
-        if: ${{ inputs.mode == 'build' }}
         shell: bash
         run: |
           set -e
@@ -397,7 +419,6 @@ jobs:
           ls -lh pure-source-v5.6.tar.gz
 
       - name: 上传预检源码
-        if: ${{ inputs.mode == 'build' }}
         uses: actions/upload-artifact@v4
         with:
           name: PureLive-Twitch-SOOP-V5.6-Source-${{ needs.prepare.outputs.tag }}
@@ -421,11 +442,7 @@ jobs:
   # =========================================================
   build-android:
     name: 编译 Android APK
-    if: >-
-      ${{
-        inputs.mode == 'build' &&
-        (inputs.target == 'all' || inputs.target == 'android')
-      }}
+    if: ${{ needs.prepare.outputs.should_build == 'true' }}
     needs:
       - prepare
       - preflight
@@ -642,7 +659,7 @@ jobs:
         with:
           name: PureLive-Twitch-SOOP-V5.6-Android-${{ needs.prepare.outputs.tag }}
           path: source/release-android/*.apk
-          retention-days: 7
+          retention-days: 30
           if-no-files-found: error
 
   # =========================================================
@@ -656,11 +673,7 @@ jobs:
   # =========================================================
   build-windows:
     name: 编译 Windows x64
-    if: >-
-      ${{
-        inputs.mode == 'build' &&
-        (inputs.target == 'all' || inputs.target == 'windows')
-      }}
+    if: ${{ needs.prepare.outputs.should_build == 'true' }}
     needs:
       - prepare
       - preflight
@@ -908,5 +921,51 @@ jobs:
           path: |
             source/release-windows/*.exe
             source/release-windows/*.zip
-          retention-days: 7
+          retention-days: 30
           if-no-files-found: error
+
+  mark-built:
+    name: 记录已编译版本
+    needs:
+      - prepare
+      - build-android
+      - build-windows
+    if: ${{ needs.prepare.outputs.should_build == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 签出 AutoBuild 仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 创建成功标记 Tag
+        shell: bash
+        run: |
+          set -e
+
+          MARKER="${{ needs.prepare.outputs.marker }}"
+          VERSION="${{ needs.prepare.outputs.tag }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote             --exit-code             --tags origin             "refs/tags/$MARKER"             >/dev/null 2>&1; then
+
+            echo "ℹ️ 标记已经存在：$MARKER"
+            echo "本次属于强制重新编译，不重复创建 Tag."
+          else
+            git tag               -a "$MARKER"               -m "Android + Windows 自动构建成功 - Pure Live $VERSION"
+
+            git push origin "$MARKER"
+
+            echo "✅ 已创建成功标记：$MARKER"
+          fi
+
+          echo ""
+          echo "======================================"
+          echo "✅ Pure Live $VERSION 自动编译完成"
+          echo "✅ 下次每日检测会自动跳过该版本"
+          echo "======================================"

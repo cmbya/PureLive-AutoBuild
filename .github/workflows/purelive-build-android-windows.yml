@@ -39,11 +39,11 @@ jobs:
 
     outputs:
       tag: ${{ steps.version.outputs.tag }}
-      marker: ${{ steps.version.outputs.marker }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
       should_build: ${{ steps.version.outputs.should_build }}
 
     steps:
-      - name: 检查最新版本
+      - name: 检查上游版本和本仓库 Release
         id: version
         shell: bash
         env:
@@ -51,7 +51,6 @@ jobs:
         run: |
           set -e
 
-          # schedule 没有 inputs；定时任务始终检查 latest。
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             REQUESTED="${{ inputs.version }}"
             FORCE="${{ inputs.force_build }}"
@@ -66,34 +65,37 @@ jobs:
             TAG="$REQUESTED"
           fi
 
-          MARKER="autobuild-aw-${TAG}"
+          RELEASE_TAG="autobuild-aw-${TAG}"
 
           echo "======================================"
-          echo "Pure Live 最新版本：$TAG"
-          echo "自动构建标记：$MARKER"
+          echo "Pure Live 上游版本：$TAG"
+          echo "本仓库 Release Tag：$RELEASE_TAG"
           echo "======================================"
 
           SHOULD_BUILD="true"
 
           if [ "$FORCE" != "true" ]; then
-            if gh api               "repos/${{ github.repository }}/git/ref/tags/$MARKER"               >/dev/null 2>&1; then
+            if gh release view               "$RELEASE_TAG"               --repo "${{ github.repository }}"               >/dev/null 2>&1; then
 
               SHOULD_BUILD="false"
 
               echo ""
-              echo "✅ $TAG 已经成功编译过"
-              echo "今天只检测，不重复编译。"
+              echo "✅ Release 已存在：$RELEASE_TAG"
+              echo "✅ 上游没有需要重新编译的新版本"
+              echo "✅ 今天不启动编译 Runner"
             else
               echo ""
-              echo "🆕 检测到尚未编译的新版本：$TAG"
+              echo "🆕 当前版本还没有对应 Release"
+              echo "🆕 开始执行预检和编译"
             fi
           else
             echo ""
-            echo "⚠️ 手动启用了 force_build：强制重新编译 $TAG"
+            echo "⚠️ force_build=true"
+            echo "⚠️ 即使 Release 已存在，也会重新编译并覆盖 Assets"
           fi
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "marker=$MARKER" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "should_build=$SHOULD_BUILD" >> "$GITHUB_OUTPUT"
 
   no-update:
@@ -107,7 +109,7 @@ jobs:
         shell: bash
         run: |
           echo "✅ Pure Live 当前仍是 ${{ needs.prepare.outputs.tag }}"
-          echo "✅ 这个版本已经编译完成"
+          echo "✅ 对应 GitHub Release 已存在"
           echo "✅ 今日不启动昂贵的编译 Runner"
 
   preflight:
@@ -924,8 +926,8 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-  mark-built:
-    name: 记录已编译版本
+  publish-release:
+    name: 发布 Android + Windows GitHub Release
     needs:
       - prepare
       - build-android
@@ -936,36 +938,116 @@ jobs:
       contents: write
 
     steps:
-      - name: 签出 AutoBuild 仓库
-        uses: actions/checkout@v4
+      - name: 下载 Android APK
+        uses: actions/download-artifact@v4
         with:
-          fetch-depth: 0
+          name: PureLive-Twitch-SOOP-V5.6-Android-${{ needs.prepare.outputs.tag }}
+          path: release-assets/android
 
-      - name: 创建成功标记 Tag
+      - name: 下载 Windows EXE + ZIP
+        uses: actions/download-artifact@v4
+        with:
+          name: PureLive-Twitch-SOOP-V5.6-Windows-${{ needs.prepare.outputs.tag }}
+          path: release-assets/windows
+
+      - name: 检查 Release Assets
         shell: bash
         run: |
           set -e
 
-          MARKER="${{ needs.prepare.outputs.marker }}"
-          VERSION="${{ needs.prepare.outputs.tag }}"
+          echo "========== Android =========="
+          find release-assets/android -type f -print
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          echo ""
+          echo "========== Windows =========="
+          find release-assets/windows -type f -print
 
-          if git ls-remote             --exit-code             --tags origin             "refs/tags/$MARKER"             >/dev/null 2>&1; then
+          APK_COUNT=$(find release-assets/android -type f -name "*.apk" | wc -l)
+          EXE_COUNT=$(find release-assets/windows -type f -name "*.exe" | wc -l)
+          ZIP_COUNT=$(find release-assets/windows -type f -name "*.zip" | wc -l)
 
-            echo "ℹ️ 标记已经存在：$MARKER"
-            echo "本次属于强制重新编译，不重复创建 Tag."
+          if [ "$APK_COUNT" -lt 1 ]; then
+            echo "❌ 没找到 Android APK"
+            exit 1
+          fi
+
+          if [ "$EXE_COUNT" -lt 1 ]; then
+            echo "❌ 没找到 Windows EXE"
+            exit 1
+          fi
+
+          if [ "$ZIP_COUNT" -lt 1 ]; then
+            echo "❌ 没找到 Windows ZIP"
+            exit 1
+          fi
+
+      - name: 创建或更新 Android + Windows Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+
+          UPSTREAM="${{ needs.prepare.outputs.tag }}"
+          RELEASE_TAG="${{ needs.prepare.outputs.release_tag }}"
+
+          cat > release-notes.md <<EOF
+          根据上游 liuchuancong/pure_live ${UPSTREAM} 自动构建。
+
+          - 上游：liuchuancong/pure_live
+          - 上游版本：${UPSTREAM}
+          - Android：APK（按 ABI 分包）
+          - Windows：x64 Setup EXE + Portable ZIP
+          - 扩展：Twitch + SOOP
+          - SOOP：支持账号登录 / Cookie
+          - Twitch / SOOP：构建前均经过真实网络预检
+
+          这是 GitHub Actions 自动构建的 Pre-release。
+          EOF
+
+          mapfile -t ASSETS < <(
+            find release-assets \
+              -type f \
+              \( -name "*.apk" -o -name "*.exe" -o -name "*.zip" \) \
+              -print
+          )
+
+          if gh release view \
+            "$RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
+            >/dev/null 2>&1; then
+
+            echo "ℹ️ Release 已存在，覆盖上传新的 Assets"
+
+            gh release upload \
+              "$RELEASE_TAG" \
+              "${ASSETS[@]}" \
+              --clobber \
+              --repo "${{ github.repository }}"
+
+            gh release edit \
+              "$RELEASE_TAG" \
+              --title "Pure Live ${UPSTREAM} Android + Windows + Twitch + SOOP" \
+              --notes-file release-notes.md \
+              --prerelease \
+              --latest=false \
+              --repo "${{ github.repository }}"
           else
-            git tag               -a "$MARKER"               -m "Android + Windows 自动构建成功 - Pure Live $VERSION"
+            echo "🆕 创建新的 Android + Windows Release"
 
-            git push origin "$MARKER"
-
-            echo "✅ 已创建成功标记：$MARKER"
+            gh release create \
+              "$RELEASE_TAG" \
+              "${ASSETS[@]}" \
+              --title "Pure Live ${UPSTREAM} Android + Windows + Twitch + SOOP" \
+              --notes-file release-notes.md \
+              --prerelease \
+              --latest=false \
+              --target "${{ github.sha }}" \
+              --repo "${{ github.repository }}"
           fi
 
           echo ""
           echo "======================================"
-          echo "✅ Pure Live $VERSION 自动编译完成"
-          echo "✅ 下次每日检测会自动跳过该版本"
+          echo "✅ Android + Windows Release 已发布"
+          echo "Release：$RELEASE_TAG"
           echo "======================================"

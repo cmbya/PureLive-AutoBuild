@@ -1,4 +1,4 @@
-name: Pure Live 每日自动更新 - iOS
+name: Pure Live 每日自动更新 - 官方 iOS + 自定义 Twitch SOOP
 
 on:
   schedule:
@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Pure Live 版本：latest 或指定版本，例如 v2.0.18"
+        description: "Pure Live 版本：latest 或指定版本，例如 v2.1.1"
         required: true
         default: "latest"
         type: string
@@ -23,11 +23,8 @@ permissions:
   contents: write
 
 concurrency:
-  group: purelive-ios-daily-autobuild
+  group: purelive-ios-official-custom-sites
   cancel-in-progress: false
-
-env:
-  FLUTTER_VERSION: "3.47.0"
 
 jobs:
   prepare:
@@ -57,7 +54,9 @@ jobs:
           fi
 
           if [ "$REQUESTED" = "latest" ]; then
-            TAG=$(gh api               repos/liuchuancong/pure_live/releases/latest               --jq '.tag_name')
+            TAG=$(gh api \
+              repos/liuchuancong/pure_live/releases/latest \
+              --jq '.tag_name')
           else
             TAG="$REQUESTED"
           fi
@@ -72,23 +71,26 @@ jobs:
           SHOULD_BUILD="true"
 
           if [ "$FORCE" != "true" ]; then
-            if gh release view               "$RELEASE_TAG"               --repo "${{ github.repository }}"               >/dev/null 2>&1; then
+            if gh release view \
+              "$RELEASE_TAG" \
+              --repo "${{ github.repository }}" \
+              >/dev/null 2>&1; then
 
               SHOULD_BUILD="false"
 
               echo ""
               echo "✅ Release 已存在：$RELEASE_TAG"
-              echo "✅ 上游没有需要重新编译的新版本"
-              echo "✅ 今天不启动编译 Runner"
+              echo "✅ 当前上游版本已经成功编译过"
+              echo "✅ 今天不启动 macOS 编译 Runner"
             else
               echo ""
               echo "🆕 当前版本还没有对应 Release"
-              echo "🆕 开始执行预检和编译"
+              echo "🆕 开始执行快速预检"
             fi
           else
             echo ""
             echo "⚠️ force_build=true"
-            echo "⚠️ 即使 Release 已存在，也会重新编译并覆盖 Assets"
+            echo "⚠️ 强制重新预检和编译 $TAG"
           fi
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -106,21 +108,21 @@ jobs:
         shell: bash
         run: |
           echo "✅ Pure Live 当前仍是 ${{ needs.prepare.outputs.tag }}"
-          echo "✅ 对应 GitHub Release 已存在"
-          echo "✅ 今日不启动昂贵的编译 Runner"
+          echo "✅ 对应 iOS Release 已存在"
+          echo "✅ 今日不启动昂贵的 macOS Runner"
 
   preflight:
-    if: ${{ needs.prepare.outputs.should_build == 'true' }}
-    name: Twitch + SOOP 完整预检
+    name: 官方结构 + 自定义 Twitch SOOP 预检
     needs: prepare
+    if: ${{ needs.prepare.outputs.should_build == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
-      - name: 下载 AutoBuild 文件
+      - name: 下载 AutoBuild 仓库
         uses: actions/checkout@v4
 
-      - name: 下载 Pure Live
+      - name: 下载 Pure Live 官方源码
         shell: bash
         run: |
           set -e
@@ -130,6 +132,25 @@ jobs:
             --branch "${{ needs.prepare.outputs.tag }}" \
             https://github.com/liuchuancong/pure_live.git \
             source
+
+      - name: 检查官方 2.1.1+ 平台注册
+        shell: bash
+        run: |
+          set -e
+
+          echo "========== 官方 Sites.supportSites =========="
+          grep -n -E \
+            "twitchSite|soopSite|iptvSite|TwitchSite|SoopSite|IptvSite" \
+            source/lib/core/sites.dart \
+            || true
+          echo "=============================================="
+
+          grep -q "TwitchSite()" source/lib/core/sites.dart
+          grep -q "SoopSite()" source/lib/core/sites.dart
+
+          echo "✅ 官方源码已经注册 Twitch"
+          echo "✅ 官方源码已经注册 SOOP"
+          echo "✅ 不再运行旧的 sites.dart 注册补丁"
 
       - name: Twitch 真实网络预检
         shell: bash
@@ -146,79 +167,65 @@ jobs:
 
           python3 scripts/preflight_soop.py
 
-      - name: 安装 Flutter
+      - name: 读取官方 Flutter 版本
+        id: flutter_version
+        shell: bash
+        run: |
+          set -e
+
+          VERSION=$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("source/.fvmrc")
+
+          if path.exists():
+              data = json.loads(path.read_text(encoding="utf-8"))
+              print(data.get("flutter", "").strip())
+          PY
+          )
+
+          if [ -z "$VERSION" ]; then
+            VERSION="3.47.0"
+            echo "ℹ️ 上游没有可读取的 .fvmrc，回退到 $VERSION"
+          else
+            echo "✅ 使用上游 .fvmrc Flutter：$VERSION"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: 安装与官方一致的 Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
+          flutter-version: ${{ steps.flutter_version.outputs.version }}
           channel: stable
           cache: true
 
-      - name: 关闭 Swift Package Manager
-        shell: bash
-        run: |
-          flutter config --no-enable-swift-package-manager
-
-      - name: 修复 Pure Live iOS
-        shell: bash
-        run: |
-          set -e
-          python3 scripts/patch_pure_ios.py source
-
-      - name: 兼容 Pure Live 2.1.1 Sites
+      - name: 仅提取自定义 Twitch / SOOP 实现
         shell: bash
         run: |
           set -e
 
-          python3 scripts/patch_sites_compat.py source
-
-      - name: 注入 Twitch V4
-        shell: bash
-        run: |
-          set -e
-
-          python3 scripts/patch_twitch.py source \
+          python3 scripts/extract_custom_sites_v211.py \
+            source \
             --hashes twitch_hashes.json \
-            --template patches/twitch_site.dart.tpl
+            --patch-twitch scripts/patch_twitch.py \
+            --twitch-template patches/twitch_site.dart.tpl \
+            --patch-soop scripts/patch_soop.py \
+            --soop-template patches/soop_site.dart.tpl \
+            --soop-auth-template patches/soop_account_settings_page.dart.tpl
 
-      - name: 注入 SOOP V1
-        shell: bash
-        run: |
-          set -e
-
-          python3 scripts/patch_soop.py source \
-            --template patches/soop_site.dart.tpl \
-            --auth-page-template patches/soop_account_settings_page.dart.tpl
-
-      - name: 获取 Flutter 依赖
+      - name: 获取官方 Flutter 依赖
         working-directory: source
         shell: bash
         run: |
           set -e
 
           rm -rf .dart_tool build
-          rm -rf ios/Pods ios/.symlinks
-          rm -f ios/Podfile.lock
-          rm -f .flutter-plugins-dependencies
-
           flutter clean
           flutter pub get
 
-          echo ""
-          echo "========== file_picker =========="
-          flutter pub deps | grep "file_picker" || true
-
-          echo ""
-          echo "========== share_handler =========="
-
-          if flutter pub deps | grep -q "share_handler"; then
-            echo "❌ share_handler 仍存在"
-            flutter pub deps | grep "share_handler"
-            exit 1
-          else
-            echo "✅ share_handler 已移除"
-          fi
-
-      - name: 格式化修改文件
+      - name: 格式化两个自定义 Site
         working-directory: source
         shell: bash
         run: |
@@ -226,18 +233,9 @@ jobs:
 
           dart format \
             lib/core/site/twitch_site.dart \
-            lib/core/site/soop_site.dart \
-            lib/modules/settings/pages/soop_account_settings_page.dart \
-            lib/modules/settings/pages/platform_settings_page.dart \
-            lib/common/services/settings/cookie_settings_controller.dart \
-            lib/core/sites.dart \
-            lib/common/utils/live_url_tool.dart \
-            lib/modules/toolbox/toolbox_controller.dart \
-            lib/modules/search/search_controller.dart \
-            lib/modules/live_play/controllers/live_play_controller.dart \
-            lib/modules/live_play/controllers/player_controller.dart
+            lib/core/site/soop_site.dart
 
-      - name: Dart 静态检查
+      - name: Dart 快速静态检查
         working-directory: source
         shell: bash
         run: |
@@ -247,53 +245,55 @@ jobs:
             --no-fatal-warnings \
             lib/core/site/twitch_site.dart \
             lib/core/site/soop_site.dart \
-            lib/modules/settings/pages/soop_account_settings_page.dart \
-            lib/modules/settings/pages/platform_settings_page.dart \
-            lib/common/services/settings/cookie_settings_controller.dart \
-            lib/core/sites.dart \
-            lib/common/utils/live_url_tool.dart \
-            lib/modules/toolbox/toolbox_controller.dart \
-            lib/modules/search/search_controller.dart \
-            lib/modules/live_play/controllers/live_play_controller.dart \
-            lib/modules/live_play/controllers/player_controller.dart
+            lib/core/sites.dart
 
-      - name: 准备 Build 源码
+      - name: 最终确认官方 iOS 未被修改
+        shell: bash
+        run: |
+          set -e
+
+          echo "✅ 本流程没有运行 patch_pure_ios.py"
+          echo "✅ 本流程没有关闭 Swift Package Manager"
+          echo "✅ 本流程没有删除 share_handler"
+          echo "✅ 本流程没有改 Podfile / ShareExtension"
+          echo "✅ 本流程没有改 Sites.supportSites"
+          echo "✅ 只覆盖 TwitchSite / SoopSite 两个 Dart 实现"
+
+      - name: 准备已预检源码
         shell: bash
         run: |
           set -e
 
           rm -rf source/.dart_tool
           rm -rf source/build
-          rm -rf source/ios/Pods
-          rm -rf source/ios/.symlinks
-          rm -f source/ios/Podfile.lock
-          rm -f source/.flutter-plugins-dependencies
           rm -rf source/.git
 
-          tar -czf pure-source-v5.tar.gz source
+          tar -czf pure-source-official-ios-custom-sites.tar.gz source
 
-      - name: 上传已通过预检的源码
+          ls -lh pure-source-official-ios-custom-sites.tar.gz
+
+      - name: 上传已预检源码
         uses: actions/upload-artifact@v4
         with:
-          name: PureLive-Twitch-SOOP-V5.3-Source-${{ needs.prepare.outputs.tag }}
-          path: pure-source-v5.tar.gz
+          name: PureLive-Official-iOS-CustomSites-Source-${{ needs.prepare.outputs.tag }}
+          path: pure-source-official-ios-custom-sites.tar.gz
           retention-days: 1
           if-no-files-found: error
 
   build-ios:
-    name: 编译 iOS IPA
-    if: ${{ needs.prepare.outputs.should_build == 'true' }}
+    name: 按官方 iOS 工程编译
     needs:
       - prepare
       - preflight
+    if: ${{ needs.prepare.outputs.should_build == 'true' }}
     runs-on: macos-26
     timeout-minutes: 120
 
     steps:
-      - name: 下载已通过预检的源码
+      - name: 下载已预检源码
         uses: actions/download-artifact@v4
         with:
-          name: PureLive-Twitch-SOOP-V5.3-Source-${{ needs.prepare.outputs.tag }}
+          name: PureLive-Official-iOS-CustomSites-Source-${{ needs.prepare.outputs.tag }}
           path: prevalidated
 
       - name: 解压源码
@@ -301,67 +301,88 @@ jobs:
         run: |
           set -e
 
-          tar -xzf prevalidated/pure-source-v5.tar.gz
+          tar -xzf \
+            prevalidated/pure-source-official-ios-custom-sites.tar.gz
+
           test -f source/lib/core/site/twitch_site.dart
           test -f source/lib/core/site/soop_site.dart
+          test -d source/ios/Runner
 
-      - name: 安装 Flutter
+          echo "✅ 使用 Pure Live 官方 iOS 工程"
+
+      - name: 读取官方 Flutter 版本
+        id: flutter_version
+        shell: bash
+        run: |
+          set -e
+
+          VERSION=$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("source/.fvmrc")
+
+          if path.exists():
+              data = json.loads(path.read_text(encoding="utf-8"))
+              print(data.get("flutter", "").strip())
+          PY
+          )
+
+          if [ -z "$VERSION" ]; then
+            VERSION="3.47.0"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Flutter：$VERSION"
+
+      - name: 安装与官方一致的 Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
+          flutter-version: ${{ steps.flutter_version.outputs.version }}
           channel: stable
           cache: true
 
-      - name: 查看编译环境
+      - name: 查看官方编译环境
         shell: bash
         run: |
+          set -e
+
           flutter --version
           dart --version
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
 
-      - name: 关闭 Swift Package Manager
-        shell: bash
-        run: |
-          flutter config --no-enable-swift-package-manager
-
-      - name: 获取 Flutter 依赖
-        working-directory: source
-        shell: bash
-        run: |
-          set -e
-          flutter clean
-          flutter pub get
-
-      - name: 安装 CocoaPods
-        working-directory: source/ios
-        shell: bash
-        run: |
-          set -e
-
-          rm -rf Pods .symlinks
-          rm -f Podfile.lock
-          pod install --repo-update
-
-      - name: 检查 Xcode 工程
-        shell: bash
-        run: |
-          set -e
-
+          echo ""
+          echo "========== iOS targets =========="
           xcodebuild \
             -project source/ios/Runner.xcodeproj \
             -list
 
-      - name: 编译无签名 iOS
+      - name: 获取官方依赖
         working-directory: source
         shell: bash
         run: |
           set -e
 
+          flutter clean
+          flutter pub get
+
+      - name: 编译官方无签名 iOS
+        working-directory: source
+        shell: bash
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "只使用官方 iOS 工程编译"
+          echo "不删除 share_handler"
+          echo "不禁用 SwiftPM"
+          echo "不修改 Podfile / ShareExtension"
+          echo "======================================"
+
           flutter build ios \
             --release \
-            --no-codesign \
-            --no-pub
+            --no-codesign
 
       - name: 检查 Runner.app
         shell: bash
@@ -378,39 +399,58 @@ jobs:
           echo "✅ Runner.app 编译成功"
           du -sh "$APP"
 
-      - name: 制作 LiveContainer IPA
+          echo ""
+          if [ -d "$APP/PlugIns" ]; then
+            echo "✅ 官方 Runner.app 含 PlugIns / App Extension"
+            find "$APP/PlugIns" -maxdepth 2 -type d -print
+          else
+            echo "ℹ️ 官方 Runner.app 当前没有 PlugIns"
+          fi
+
+      - name: 制作两个 IPA
         shell: bash
         run: |
           set -e
 
           TAG="${{ needs.prepare.outputs.tag }}"
           VERSION="${TAG#v}"
+          APP="source/build/ios/iphoneos/Runner.app"
 
-          rm -rf ipa
-          mkdir -p ipa/Payload
+          rm -rf package-official package-livecontainer
+          mkdir -p package-official/Payload
+          mkdir -p package-livecontainer/Payload
 
-          cp -R \
-            source/build/ios/iphoneos/Runner.app \
-            ipa/Payload/
+          # 1) 官方结构：完整保留 PlugIns / ShareExtension
+          cp -R "$APP" package-official/Payload/
 
-          rm -rf ipa/Payload/Runner.app/PlugIns
+          (
+            cd package-official
+            zip -qry \
+              "../PureLive-${VERSION}-Custom-Twitch-SOOP-iOS-Official-Unsigned.ipa" \
+              Payload
+          )
 
-          cd ipa
+          # 2) LiveContainer：只在最终副本里去掉 App Extension。
+          #    注意：源码和官方编译过程都没有被改。
+          cp -R "$APP" package-livecontainer/Payload/
+          rm -rf package-livecontainer/Payload/Runner.app/PlugIns
 
-          zip -qry \
-            "../PureLive-${VERSION}-Twitch-SOOP-V5.3-iOS-LiveContainer.ipa" \
-            Payload
+          (
+            cd package-livecontainer
+            zip -qry \
+              "../PureLive-${VERSION}-Custom-Twitch-SOOP-iOS-LiveContainer.ipa" \
+              Payload
+          )
 
-          cd ..
+          echo ""
+          echo "========== IPA =========="
+          ls -lh PureLive-*.ipa
 
-          ls -lh \
-            PureLive-*-Twitch-SOOP-V5.3-iOS-LiveContainer.ipa
-
-      - name: 上传 IPA
+      - name: 上传 iOS IPA
         uses: actions/upload-artifact@v4
         with:
-          name: PureLive-Twitch-SOOP-V5.3-iOS-${{ needs.prepare.outputs.tag }}
-          path: PureLive-*-Twitch-SOOP-V5.3-iOS-LiveContainer.ipa
+          name: PureLive-Custom-Twitch-SOOP-iOS-${{ needs.prepare.outputs.tag }}
+          path: PureLive-*.ipa
           retention-days: 30
           if-no-files-found: error
 
@@ -428,7 +468,7 @@ jobs:
       - name: 下载 iOS IPA
         uses: actions/download-artifact@v4
         with:
-          name: PureLive-Twitch-SOOP-V5.3-iOS-${{ needs.prepare.outputs.tag }}
+          name: PureLive-Custom-Twitch-SOOP-iOS-${{ needs.prepare.outputs.tag }}
           path: release-assets
 
       - name: 检查 Release Assets
@@ -437,12 +477,12 @@ jobs:
           set -e
 
           echo "========== iOS Assets =========="
-          find release-assets -maxdepth 2 -type f -print
+          find release-assets -type f -name "*.ipa" -print
 
           IPA_COUNT=$(find release-assets -type f -name "*.ipa" | wc -l)
 
-          if [ "$IPA_COUNT" -lt 1 ]; then
-            echo "❌ 没找到 IPA"
+          if [ "$IPA_COUNT" -lt 2 ]; then
+            echo "❌ 预期应有 2 个 IPA"
             exit 1
           fi
 
@@ -455,18 +495,24 @@ jobs:
 
           UPSTREAM="${{ needs.prepare.outputs.tag }}"
           RELEASE_TAG="${{ needs.prepare.outputs.release_tag }}"
-          VERSION="${UPSTREAM#v}"
 
           cat > release-notes.md <<EOF
           根据上游 liuchuancong/pure_live ${UPSTREAM} 自动构建。
 
-          - 上游：liuchuancong/pure_live
-          - 上游版本：${UPSTREAM}
-          - 平台：iOS
-          - 构建：LiveContainer 无签名 IPA
-          - 扩展：Twitch + SOOP
-          - SOOP：支持账号登录 / Cookie
-          - Twitch / SOOP：构建前均经过真实网络预检
+          - iOS 工程：完整沿用上游官方 iOS 工程
+          - 不再运行旧 patch_pure_ios.py
+          - 不删除 share_handler
+          - 不禁用 Swift Package Manager
+          - 不修改 Podfile / ShareExtension
+          - 不修改官方 Sites.supportSites
+          - 自定义部分：仅替换 TwitchSite 与 SoopSite
+          - Twitch：使用自己的无弹幕实现
+          - SOOP：使用自己的实现，并复用官方本地账号/Cookie设置
+          - 构建前执行 Twitch / SOOP 真实网络预检
+
+          Assets：
+          - Official-Unsigned：完整保留官方 App Extension
+          - LiveContainer：仅在最终 IPA 副本中去掉 PlugIns，方便 LiveContainer 使用
 
           这是 GitHub Actions 自动构建的 Pre-release。
           EOF
@@ -483,8 +529,6 @@ jobs:
             --repo "${{ github.repository }}" \
             >/dev/null 2>&1; then
 
-            echo "ℹ️ Release 已存在，覆盖上传新的 IPA"
-
             gh release upload \
               "$RELEASE_TAG" \
               "${ASSETS[@]}" \
@@ -493,18 +537,16 @@ jobs:
 
             gh release edit \
               "$RELEASE_TAG" \
-              --title "Pure Live ${UPSTREAM} iOS + Twitch + SOOP" \
+              --title "Pure Live ${UPSTREAM} 官方 iOS + 自定义 Twitch / SOOP" \
               --notes-file release-notes.md \
               --prerelease \
               --latest=false \
               --repo "${{ github.repository }}"
           else
-            echo "🆕 创建新的 iOS Release"
-
             gh release create \
               "$RELEASE_TAG" \
               "${ASSETS[@]}" \
-              --title "Pure Live ${UPSTREAM} iOS + Twitch + SOOP" \
+              --title "Pure Live ${UPSTREAM} 官方 iOS + 自定义 Twitch / SOOP" \
               --notes-file release-notes.md \
               --prerelease \
               --latest=false \

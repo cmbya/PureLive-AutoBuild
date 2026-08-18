@@ -266,15 +266,29 @@ class SoopSite extends LiveSite {
 
     final roomId = bno.isEmpty ? bid : '$bid/$bno';
 
+    final avatar = _normalizeImageUrl(
+      item['profile_img'] ??
+          item['profile_image'] ??
+          item['user_profile_img'],
+    );
+
+    final listCover = _normalizeImageUrl(
+      item['broad_thumb'] ?? item['broad_img'],
+    );
+
+    final fallbackCover = bno.isEmpty
+        ? ''
+        : 'https://liveimg.sooplive.com/m/$bno';
+
     return LiveRoom(
       roomId: roomId,
       userId: bid,
       title: item['broad_title']?.toString() ?? '',
       nick: item['user_nick']?.toString() ?? bid,
-      avatar: '',
-      cover: _normalizeImageUrl(
-        item['broad_thumb'] ?? item['broad_img'],
-      ),
+      avatar: avatar,
+      cover: listCover.isNotEmpty
+          ? listCover
+          : fallbackCover,
       area: item['category_name']?.toString() ?? '',
       watching: (
         item['current_view_cnt'] ??
@@ -438,14 +452,27 @@ class SoopSite extends LiveSite {
         ? bid
         : '$bid/$bno';
 
+    final avatar = _normalizeImageUrl(
+      data['PROFILE_IMG'] ??
+          data['profile_img'] ??
+          data['USER_PROFILE_IMG'],
+    );
+
+    // Pure Live 的“关注”页会重新调用 getRoomDetail()。
+    // 旧模板在这里把 cover 写死为空，所以关注页没有封面。
+    // 当前直播详情已经能拿到 BNO，直接按 SOOP 直播封面规则生成。
+    final cover = isLive && bno.isNotEmpty
+        ? 'https://liveimg.sooplive.com/m/$bno'
+        : '';
+
     return LiveRoom(
       roomId: normalized,
       userId: bid,
       title: data['TITLE']?.toString() ??
           (isLive ? '' : '未开播 / 无法观看'),
       nick: data['BJNICK']?.toString() ?? bid,
-      avatar: '',
-      cover: '',
+      avatar: avatar,
+      cover: cover,
       watching: (
         data['CTUSER'] ??
         data['VIEWCNT'] ??

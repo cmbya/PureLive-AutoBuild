@@ -12,6 +12,8 @@ import 'package:pure_live/model/live_play_quality.dart';
 class SoopNoDanmaku extends LiveDanmaku {}
 
 class SoopSite extends LiveSite {
+  // CMBYA_SOOP_FOLLOW_COVER_V2
+
   static const String platformId = 'soop';
 
   static const String _listApi =
@@ -458,12 +460,26 @@ class SoopSite extends LiveSite {
           data['USER_PROFILE_IMG'],
     );
 
-    // Pure Live 的“关注”页会重新调用 getRoomDetail()。
-    // 旧模板在这里把 cover 写死为空，所以关注页没有封面。
-    // 当前直播详情已经能拿到 BNO，直接按 SOOP 直播封面规则生成。
-    final cover = isLive && bno.isNotEmpty
-        ? 'https://liveimg.sooplive.com/m/$bno'
-        : '';
+    // CMBYA_SOOP_FOLLOW_COVER_V2
+    //
+    // 关注页使用 getRoomDetail() 返回的 LiveRoom。
+    // 优先采用 SOOP 返回的直播封面字段；如果详情接口不返回封面，
+    // 则使用当前直播 BNO 按官方 broad_thumb 规则生成封面。
+    final directCover = _normalizeImageUrl(
+      data['BROAD_THUMB'] ??
+          data['broad_thumb'] ??
+          data['BROAD_IMG'] ??
+          data['broad_img'],
+    );
+
+    final hasValidBroadNo =
+        RegExp(r'^\d+$').hasMatch(bno);
+
+    final cover = directCover.isNotEmpty
+        ? directCover
+        : (isLive && hasValidBroadNo
+            ? 'https://liveimg.sooplive.com/m/$bno'
+            : '');
 
     return LiveRoom(
       roomId: normalized,

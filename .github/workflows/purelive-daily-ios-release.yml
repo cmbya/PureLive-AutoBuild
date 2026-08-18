@@ -215,6 +215,51 @@ jobs:
             --soop-template patches/soop_site.dart.tpl \
             --soop-auth-template patches/soop_account_settings_page.dart.tpl
 
+      - name: 强制验证 SOOP 关注页封面代码
+        shell: bash
+        run: |
+          set -e
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("source/lib/core/site/soop_site.dart")
+          text = path.read_text(encoding="utf-8")
+
+          start = text.find("Future<LiveRoom> getRoomDetail")
+          if start < 0:
+              raise SystemExit("❌ 找不到 SOOP getRoomDetail()")
+
+          end = text.find("@override", start + 20)
+          if end < 0:
+              end = min(len(text), start + 5000)
+
+          block = text[start:end]
+
+          checks = {
+              "V2 marker": "CMBYA_SOOP_FOLLOW_COVER_V2" in block,
+              "direct cover": "final directCover =" in block,
+              "BNO cover URL": "https://liveimg.sooplive.com/m/$bno" in block,
+              "LiveRoom cover": "cover: cover," in block,
+              "旧空封面已删除": "cover: ''," not in block,
+          }
+
+          for name, ok in checks.items():
+              print(("✅" if ok else "❌"), name)
+
+          if not all(checks.values()):
+              print("")
+              print("========== getRoomDetail 实际内容 ==========")
+              print(block)
+              print("============================================")
+              raise SystemExit(
+                  "❌ SOOP 关注页封面修复没有真正进入最终源码，停止编译"
+              )
+
+          print("")
+          print("✅ SOOP 关注页封面修复 V2 已真正进入最终源码")
+          PY
+
       - name: 获取官方 Flutter 依赖
         working-directory: source
         shell: bash

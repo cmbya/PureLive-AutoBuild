@@ -1,6 +1,6 @@
 # Pure Live 
 
-大佬的项目https://github.com/Jackiu1997/pure_live
+大佬的项目[https://github.com/Jackiu1997/pure_live](https://github.com/liuchuancong/pure_live)
 
 基于大佬的项目，增加了Twitch / SOOP
 

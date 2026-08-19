@@ -1,1 +1,7 @@
-# Pure Live 官方 iOS + 自定义 Twitch / SOOP
+# Pure Live 
+
+大佬的项目https://github.com/Jackiu1997/pure_live
+
+基于大佬的项目，增加了Twitch / SOOP
+
+可登录soop账号，twitch和soop都无弹幕

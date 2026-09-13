@@ -1,0 +1,1082 @@
+name: Pure Live 每日统一构建 - iOS + Android + Windows
+
+on:
+  schedule:
+    - cron: "17 10 * * *"
+      timezone: "Asia/Shanghai"
+
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Pure Live 版本：latest 或指定版本，例如 v3.1.1"
+        required: true
+        default: "latest"
+        type: string
+
+      build_target:
+        description: "手动编译平台；定时任务固定编译全部平台"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - ios
+          - android
+          - windows
+
+      force_build:
+        description: "即使目标平台已经编译过，也强制重新编译"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: purelive-unified-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: 检查上游版本与统一 Release
+    runs-on: ubuntu-latest
+
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+      should_build: ${{ steps.version.outputs.should_build }}
+      target: ${{ steps.version.outputs.target }}
+
+    steps:
+      - name: 检查上游版本和统一 Release Assets
+        id: version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            REQUESTED="${{ inputs.version }}"
+            FORCE="${{ inputs.force_build }}"
+            TARGET="${{ inputs.build_target }}"
+          else
+            REQUESTED="latest"
+            FORCE="false"
+            TARGET="all"
+          fi
+
+          case "$TARGET" in
+            all|ios|android|windows)
+              ;;
+            *)
+              echo "❌ 未知 build_target：$TARGET"
+              exit 1
+              ;;
+          esac
+
+          if [ "$REQUESTED" = "latest" ]; then
+            TAG=$(gh api \
+              repos/liuchuancong/pure_live/releases/latest \
+              --jq '.tag_name')
+          else
+            TAG="$REQUESTED"
+            if [[ "$TAG" != v* ]]; then
+              TAG="v$TAG"
+            fi
+          fi
+
+          if [[ "$TAG" != v[0-9]* ]]; then
+            echo "❌ 无效的 Pure Live Release Tag：$TAG"
+            exit 1
+          fi
+
+          gh api \
+            "repos/liuchuancong/pure_live/releases/tags/${TAG}" \
+            --jq '.tag_name' >/dev/null
+
+          VERSION="${TAG#v}"
+          RELEASE_TAG="autobuild-${TAG}"
+
+          IOS_OFFICIAL="PureLive-${VERSION}-iOS-Official.ipa"
+          IOS_LIVECONTAINER="PureLive-${VERSION}-iOS-LiveContainer.ipa"
+          ANDROID="PureLive-${VERSION}-Android-arm64-v8a.apk"
+          WINDOWS="PureLive-${VERSION}-Windows.zip"
+
+          ASSETS=""
+          if gh release view \
+            "$RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
+            >/dev/null 2>&1; then
+            ASSETS=$(gh release view \
+              "$RELEASE_TAG" \
+              --repo "${{ github.repository }}" \
+              --json assets \
+              --jq '.assets[].name' \
+              || true)
+          fi
+
+          has_asset() {
+            local wanted="$1"
+            while IFS= read -r asset; do
+              if [ "$asset" = "$wanted" ]; then
+                return 0
+              fi
+            done <<< "$ASSETS"
+            return 1
+          }
+
+          SHOULD_BUILD="true"
+
+          if [ "$FORCE" != "true" ]; then
+            case "$TARGET" in
+              ios)
+                if has_asset "$IOS_OFFICIAL" && \
+                   has_asset "$IOS_LIVECONTAINER"; then
+                  SHOULD_BUILD="false"
+                fi
+                ;;
+              android)
+                if has_asset "$ANDROID"; then
+                  SHOULD_BUILD="false"
+                fi
+                ;;
+              windows)
+                if has_asset "$WINDOWS"; then
+                  SHOULD_BUILD="false"
+                fi
+                ;;
+              all)
+                if has_asset "$IOS_OFFICIAL" && \
+                   has_asset "$IOS_LIVECONTAINER" && \
+                   has_asset "$ANDROID" && \
+                   has_asset "$WINDOWS"; then
+                  SHOULD_BUILD="false"
+                fi
+                ;;
+            esac
+          fi
+
+          echo "======================================"
+          echo "Pure Live 上游版本：$TAG"
+          echo "软件版本：$VERSION"
+          echo "统一 Release：$RELEASE_TAG"
+          echo "本次目标：$TARGET"
+          echo "======================================"
+
+          if [ "$FORCE" = "true" ]; then
+            echo "⚠️ force_build=true，强制编译 $TARGET"
+          elif [ "$SHOULD_BUILD" = "true" ]; then
+            echo "🆕 目标平台 Assets 不完整，开始编译"
+          else
+            echo "✅ 目标平台 Assets 已完整存在"
+            echo "✅ 本次不重复编译"
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "should_build=$SHOULD_BUILD" >> "$GITHUB_OUTPUT"
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+
+  no-update:
+    name: 无需编译
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_build != 'true' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 当前目标已经完成
+        shell: bash
+        run: |
+          echo "✅ Pure Live：${{ needs.prepare.outputs.tag }}"
+          echo "✅ 目标平台：${{ needs.prepare.outputs.target }}"
+          echo "✅ 对应统一 Release Assets 已存在"
+
+  preflight:
+    name: 官方源码 + 自定义 Twitch SOOP 预检
+    needs: prepare
+    if: ${{ needs.prepare.outputs.should_build == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    outputs:
+      flutter_version: ${{ steps.flutter_version.outputs.version }}
+
+    steps:
+      - name: 下载 AutoBuild 仓库
+        uses: actions/checkout@v4
+
+      - name: 下载 Pure Live 官方源码
+        shell: bash
+        run: |
+          set -e
+
+          git clone \
+            --depth 1 \
+            --branch "${{ needs.prepare.outputs.tag }}" \
+            https://github.com/liuchuancong/pure_live.git \
+            source
+
+      - name: 检查官方平台结构
+        shell: bash
+        run: |
+          set -e
+
+          TARGET="${{ needs.prepare.outputs.target }}"
+
+          test -f source/lib/core/sites.dart
+          grep -q "TwitchSite()" source/lib/core/sites.dart
+          grep -q "SoopSite()" source/lib/core/sites.dart
+
+          if [ "$TARGET" = "all" ] || [ "$TARGET" = "ios" ]; then
+            test -d source/ios/Runner
+            test -f source/ios/Runner.xcodeproj/project.pbxproj
+            echo "✅ 官方 iOS 工程存在"
+          fi
+
+          if [ "$TARGET" = "all" ] || [ "$TARGET" = "android" ]; then
+            test -d source/android
+            echo "✅ 官方 Android 工程存在"
+          fi
+
+          if [ "$TARGET" = "all" ] || [ "$TARGET" = "windows" ]; then
+            test -d source/windows
+            echo "✅ 官方 Windows 工程存在"
+          fi
+
+          echo "✅ 官方已经注册 Twitch / SOOP"
+          echo "✅ 不修改 Sites.supportSites"
+
+      - name: Twitch 真实网络预检
+        shell: bash
+        run: |
+          set -e
+
+          python3 scripts/preflight_twitch.py \
+            --hash-output twitch_hashes.json
+
+      - name: SOOP 真实网络预检
+        shell: bash
+        run: |
+          set -e
+
+          python3 scripts/preflight_soop.py
+
+      - name: 读取官方 Flutter 版本
+        id: flutter_version
+        shell: bash
+        run: |
+          set -e
+
+          VERSION=$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("source/.fvmrc")
+
+          if path.exists():
+              try:
+                  data = json.loads(
+                      path.read_text(encoding="utf-8")
+                  )
+                  print(str(data.get("flutter", "")).strip())
+              except Exception:
+                  pass
+          PY
+          )
+
+          if [ -z "$VERSION" ]; then
+            VERSION="3.47.0"
+            echo "ℹ️ 未读取到 .fvmrc，回退 Flutter $VERSION"
+          else
+            echo "✅ 官方 Flutter：$VERSION"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: 安装官方 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ steps.flutter_version.outputs.version }}
+          channel: stable
+          cache: true
+
+      - name: 仅替换自定义 Twitch / SOOP 实现
+        shell: bash
+        run: |
+          set -e
+
+          python3 scripts/extract_custom_sites_v211.py \
+            source \
+            --hashes twitch_hashes.json \
+            --patch-twitch scripts/patch_twitch.py \
+            --twitch-template patches/twitch_site.dart.tpl \
+            --patch-soop scripts/patch_soop.py \
+            --soop-template patches/soop_site.dart.tpl \
+            --soop-auth-template patches/soop_account_settings_page.dart.tpl
+
+      - name: 强制验证 SOOP 关注页封面代码
+        shell: bash
+        run: |
+          set -e
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("source/lib/core/site/soop_site.dart")
+          text = path.read_text(encoding="utf-8")
+
+          start = text.find("Future<LiveRoom> getRoomDetail")
+          if start < 0:
+              raise SystemExit("❌ 找不到 SOOP getRoomDetail()")
+
+          end = text.find("@override", start + 20)
+          if end < 0:
+              end = min(len(text), start + 5000)
+
+          block = text[start:end]
+
+          checks = {
+              "V2 marker":
+                  "CMBYA_SOOP_FOLLOW_COVER_V2" in block,
+              "BNO cover":
+                  "https://liveimg.sooplive.com/m/$bno" in block,
+              "LiveRoom cover":
+                  "cover: cover," in block,
+              "旧空封面已删除":
+                  "cover: ''," not in block,
+          }
+
+          for name, ok in checks.items():
+              print(("✅" if ok else "❌"), name)
+
+          if not all(checks.values()):
+              print(block)
+              raise SystemExit(
+                  "❌ SOOP 关注页封面 V2 没有进入最终源码"
+              )
+
+          print("✅ SOOP 关注页封面 V2 已进入最终源码")
+          PY
+
+      - name: 获取官方 Flutter 依赖
+        working-directory: source
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf .dart_tool build
+          flutter clean
+          flutter pub get
+
+      - name: 格式化自定义平台文件
+        working-directory: source
+        shell: bash
+        run: |
+          set -e
+
+          dart format \
+            lib/core/site/twitch_site.dart \
+            lib/core/site/soop_site.dart
+
+      - name: Dart 快速静态检查
+        working-directory: source
+        shell: bash
+        run: |
+          set -e
+
+          dart analyze \
+            --no-fatal-warnings \
+            lib/core/site/twitch_site.dart \
+            lib/core/site/soop_site.dart \
+            lib/core/sites.dart
+
+      - name: 准备已预检源码
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf source/.dart_tool
+          rm -rf source/build
+          rm -rf source/.git
+
+          tar -czf pure-source-official-custom-sites.tar.gz source
+
+          ls -lh pure-source-official-custom-sites.tar.gz
+
+      - name: 上传已预检源码
+        uses: actions/upload-artifact@v4
+        with:
+          name: PureLive-CustomSites-Source-${{ needs.prepare.outputs.tag }}
+          path: pure-source-official-custom-sites.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  build-ios:
+    name: 编译 iOS（官方 + LiveContainer）
+    needs:
+      - prepare
+      - preflight
+    if: >-
+      ${{
+        needs.prepare.outputs.should_build == 'true' &&
+        (
+          needs.prepare.outputs.target == 'all' ||
+          needs.prepare.outputs.target == 'ios'
+        )
+      }}
+    runs-on: macos-26
+    timeout-minutes: 120
+
+    steps:
+      - name: 下载已预检源码
+        uses: actions/download-artifact@v4
+        with:
+          name: PureLive-CustomSites-Source-${{ needs.prepare.outputs.tag }}
+          path: prevalidated
+
+      - name: 解压源码
+        shell: bash
+        run: |
+          set -e
+
+          tar -xzf \
+            prevalidated/pure-source-official-custom-sites.tar.gz
+
+          test -f source/lib/core/site/twitch_site.dart
+          test -f source/lib/core/site/soop_site.dart
+          test -d source/ios/Runner
+
+      - name: 安装官方 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ needs.preflight.outputs.flutter_version }}
+          channel: stable
+          cache: true
+
+      - name: 查看官方编译环境
+        shell: bash
+        run: |
+          set -e
+
+          flutter --version
+          dart --version
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: 获取官方依赖
+        working-directory: source
+        shell: bash
+        run: |
+          set -e
+
+          flutter clean
+          flutter pub get
+
+      - name: 编译官方无签名 iOS
+        working-directory: source
+        shell: bash
+        run: |
+          set -e
+
+          echo "======================================"
+          echo "只使用官方 iOS 工程编译"
+          echo "不删除 share_handler"
+          echo "不禁用 Swift Package Manager"
+          echo "不修改 Podfile / ShareExtension"
+          echo "======================================"
+
+          flutter build ios \
+            --release \
+            --no-codesign
+
+      - name: 检查 Runner.app
+        shell: bash
+        run: |
+          set -e
+
+          APP="source/build/ios/iphoneos/Runner.app"
+
+          if [ ! -d "$APP" ]; then
+            echo "❌ Runner.app 不存在"
+            exit 1
+          fi
+
+          echo "✅ Runner.app 编译成功"
+          du -sh "$APP"
+
+      - name: 制作两个 IPA
+        shell: bash
+        run: |
+          set -e
+
+          VERSION="${{ needs.prepare.outputs.version }}"
+          APP="source/build/ios/iphoneos/Runner.app"
+
+          rm -rf package-official package-livecontainer
+          mkdir -p package-official/Payload
+          mkdir -p package-livecontainer/Payload
+
+          # 官方版：完整保留官方 App Extension。
+          cp -R "$APP" package-official/Payload/
+
+          (
+            cd package-official
+            zip -qry \
+              "../PureLive-${VERSION}-iOS-Official.ipa" \
+              Payload
+          )
+
+          # LiveContainer 优化版：只在最终 IPA 副本中去掉 PlugIns。
+          cp -R "$APP" package-livecontainer/Payload/
+          rm -rf package-livecontainer/Payload/Runner.app/PlugIns
+
+          (
+            cd package-livecontainer
+            zip -qry \
+              "../PureLive-${VERSION}-iOS-LiveContainer.ipa" \
+              Payload
+          )
+
+          echo "========== iOS IPA =========="
+          ls -lh PureLive-*.ipa
+
+      - name: 上传 iOS IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: PureLive-iOS-${{ needs.prepare.outputs.tag }}
+          path: PureLive-*.ipa
+          retention-days: 30
+          if-no-files-found: error
+
+  build-android:
+    name: 编译 Android arm64-v8a
+    needs:
+      - prepare
+      - preflight
+    if: >-
+      ${{
+        needs.prepare.outputs.should_build == 'true' &&
+        (
+          needs.prepare.outputs.target == 'all' ||
+          needs.prepare.outputs.target == 'android'
+        )
+      }}
+    runs-on: macos-latest
+    timeout-minutes: 150
+
+    steps:
+      - name: 下载已预检源码
+        uses: actions/download-artifact@v4
+        with:
+          name: PureLive-CustomSites-Source-${{ needs.prepare.outputs.tag }}
+          path: prevalidated
+
+      - name: 解压源码
+        shell: bash
+        run: |
+          set -e
+
+          tar -xzf \
+            prevalidated/pure-source-official-custom-sites.tar.gz
+
+          test -d source/android
+
+      - name: 设置 Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: "17"
+          cache: gradle
+
+      - name: 安装官方 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ needs.preflight.outputs.flutter_version }}
+          channel: stable
+          cache: true
+
+      - name: 准备 Android 签名
+        working-directory: source
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -e
+
+          KEYSTORE="$PWD/android/purelive-release.jks"
+
+          if [ -n "$KEYSTORE_BASE64" ] && \
+             [ -n "$STORE_PASSWORD" ] && \
+             [ -n "$KEY_PASSWORD" ] && \
+             [ -n "$KEY_ALIAS" ]; then
+            echo "✅ 使用 GitHub Secrets 固定签名"
+
+            KEYSTORE_PATH="$KEYSTORE" \
+            KEYSTORE_BASE64="$KEYSTORE_BASE64" \
+            python3 - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+
+          raw = os.environ["KEYSTORE_BASE64"]
+          path = Path(os.environ["KEYSTORE_PATH"])
+          path.write_bytes(base64.b64decode(raw))
+          PY
+          else
+            echo "⚠️ 未设置固定 Android 签名，生成临时签名"
+
+            STORE_PASSWORD="PureLiveAutoBuild"
+            KEY_PASSWORD="PureLiveAutoBuild"
+            KEY_ALIAS="purelive"
+
+            keytool \
+              -genkeypair \
+              -v \
+              -keystore "$KEYSTORE" \
+              -storepass "$STORE_PASSWORD" \
+              -keypass "$KEY_PASSWORD" \
+              -alias "$KEY_ALIAS" \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=PureLive AutoBuild, OU=Personal, O=PureLive, C=CN"
+          fi
+
+          cat > android/key.properties <<EOF
+          storeFile=$KEYSTORE
+          storePassword=$STORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          EOF
+
+      - name: CI 禁用所有 Android Lint 任务
+        shell: bash
+        run: |
+          set -e
+
+          export GRADLE_USER_HOME="${RUNNER_TEMP}/purelive-gradle"
+          mkdir -p "$GRADLE_USER_HOME"
+          echo "GRADLE_USER_HOME=$GRADLE_USER_HOME" >> "$GITHUB_ENV"
+
+          cat > "$GRADLE_USER_HOME/init.gradle" <<'GRADLE'
+          gradle.beforeProject { project ->
+              project.tasks.configureEach { task ->
+                  def n = task.name.toLowerCase()
+                  if (n.startsWith("lint")) {
+                      task.enabled = false
+                  }
+              }
+          }
+          GRADLE
+
+          echo "✅ 仅在 GitHub Actions 构建环境禁用 lint* 任务"
+
+      - name: 获取 Flutter 依赖
+        working-directory: source
+        shell: bash
+        run: |
+          set -e
+
+          flutter clean
+          flutter pub get
+
+      - name: 编译 Android arm64-v8a APK
+        working-directory: source
+        shell: bash
+        run: |
+          set -e
+          set -o pipefail
+
+          set +e
+          flutter build apk \
+            --release \
+            --target-platform android-arm64 \
+            --split-per-abi \
+            2>&1 | tee android-first-build.log
+          FIRST_EXIT=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$FIRST_EXIT" -eq 0 ]; then
+            echo "✅ Android arm64-v8a 构建成功"
+          elif grep -Fq \
+            "File modified during build. Build must be rerun." \
+            android-first-build.log; then
+            echo "⚠️ FFmpegKit 首次准备完成，自动第二次构建"
+            flutter build apk \
+              --release \
+              --target-platform android-arm64 \
+              --split-per-abi
+          else
+            echo "❌ Android 构建失败"
+            tail -n 160 android-first-build.log
+            exit "$FIRST_EXIT"
+          fi
+
+      - name: 整理 Android APK
+        working-directory: source
+        shell: bash
+        run: |
+          set -e
+
+          VERSION="${{ needs.prepare.outputs.version }}"
+          APK_DIR="build/app/outputs/flutter-apk"
+          APK="$APK_DIR/app-arm64-v8a-release.apk"
+
+          if [ ! -f "$APK" ]; then
+            APK="$APK_DIR/app-release.apk"
+          fi
+
+          if [ ! -f "$APK" ]; then
+            echo "❌ 没找到 arm64-v8a APK"
+            find "$APK_DIR" -maxdepth 1 -type f -print || true
+            exit 1
+          fi
+
+          mkdir -p release-android
+          cp "$APK" \
+            "release-android/PureLive-${VERSION}-Android-arm64-v8a.apk"
+
+          ls -lh release-android
+
+      - name: 上传 Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PureLive-Android-${{ needs.prepare.outputs.tag }}
+          path: source/release-android/*.apk
+          retention-days: 30
+          if-no-files-found: error
+
+  build-windows:
+    name: 编译 Windows ZIP
+    needs:
+      - prepare
+      - preflight
+    if: >-
+      ${{
+        needs.prepare.outputs.should_build == 'true' &&
+        (
+          needs.prepare.outputs.target == 'all' ||
+          needs.prepare.outputs.target == 'windows'
+        )
+      }}
+    runs-on: windows-latest
+    timeout-minutes: 150
+
+    steps:
+      - name: 下载已预检源码
+        uses: actions/download-artifact@v4
+        with:
+          name: PureLive-CustomSites-Source-${{ needs.prepare.outputs.tag }}
+          path: prevalidated
+
+      - name: 解压源码
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          tar -xzf `
+            "prevalidated/pure-source-official-custom-sites.tar.gz"
+
+          if (-not (Test-Path "source/windows")) {
+            throw "官方 Windows 工程不存在"
+          }
+
+      - name: 安装官方 Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ needs.preflight.outputs.flutter_version }}
+          channel: stable
+          cache: true
+
+      - name: 启用 Flutter Windows
+        shell: pwsh
+        run: |
+          flutter config --enable-windows-desktop
+          flutter doctor -v
+
+      - name: 获取 Flutter 依赖
+        working-directory: source
+        shell: pwsh
+        run: |
+          flutter clean
+          flutter pub get
+
+      - name: 编译 Windows Release
+        working-directory: source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+
+          & flutter build windows --release 2>&1 |
+            Tee-Object -FilePath "windows-first-build.log"
+
+          $firstExit = $LASTEXITCODE
+          $ErrorActionPreference = "Stop"
+
+          if ($firstExit -eq 0) {
+            Write-Host "✅ Windows Release 构建成功"
+          }
+          else {
+            $log = Get-Content "windows-first-build.log" -Raw
+
+            if ($log -match "File modified during build\. Build must be rerun\.") {
+              Write-Host "⚠️ FFmpegKit 首次准备完成，自动第二次构建"
+              flutter build windows --release
+            }
+            else {
+              Write-Host "❌ Windows 构建失败"
+              Get-Content "windows-first-build.log" -Tail 160
+              exit $firstExit
+            }
+          }
+
+      - name: 整理 Windows ZIP
+        working-directory: source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $version = "${{ needs.prepare.outputs.version }}"
+          $bundle = "build\windows\x64\runner\Release"
+
+          if (-not (Test-Path $bundle)) {
+            $bundle = "build\windows\runner\Release"
+          }
+
+          if (-not (Test-Path $bundle)) {
+            throw "Windows Release 目录不存在"
+          }
+
+          $temporary = Join-Path $env:RUNNER_TEMP "pure-live-windows"
+          Remove-Item $temporary -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $temporary -Force | Out-Null
+
+          Get-ChildItem $bundle -Force |
+            Where-Object {
+              $_.Name -notin @("AppData", "IPTV_CACHE")
+            } |
+            Copy-Item -Destination $temporary -Recurse -Force
+
+          New-Item -ItemType Directory -Path "release-windows" -Force |
+            Out-Null
+
+          $zip = "release-windows\PureLive-$version-Windows.zip"
+          Compress-Archive `
+            -Path (Join-Path $temporary "*") `
+            -DestinationPath $zip `
+            -CompressionLevel Optimal `
+            -Force
+
+          if (-not (Test-Path $zip -PathType Leaf)) {
+            throw "Windows ZIP 没有生成"
+          }
+
+          tar -tf $zip | Out-Host
+          Get-Item $zip | Format-List Name,Length
+
+      - name: 上传 Windows ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: PureLive-Windows-${{ needs.prepare.outputs.tag }}
+          path: source/release-windows/*.zip
+          retention-days: 30
+          if-no-files-found: error
+
+  publish-release:
+    name: 发布统一 GitHub Release
+    needs:
+      - prepare
+      - build-ios
+      - build-android
+      - build-windows
+    if: >-
+      ${{
+        always() &&
+        needs.prepare.outputs.should_build == 'true' &&
+        (
+          (
+            needs.prepare.outputs.target == 'all' &&
+            needs.build-ios.result == 'success' &&
+            needs.build-android.result == 'success' &&
+            needs.build-windows.result == 'success'
+          ) ||
+          (
+            needs.prepare.outputs.target == 'ios' &&
+            needs.build-ios.result == 'success'
+          ) ||
+          (
+            needs.prepare.outputs.target == 'android' &&
+            needs.build-android.result == 'success'
+          ) ||
+          (
+            needs.prepare.outputs.target == 'windows' &&
+            needs.build-windows.result == 'success'
+          )
+        )
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 下载 iOS IPA
+        if: >-
+          ${{
+            needs.prepare.outputs.target == 'all' ||
+            needs.prepare.outputs.target == 'ios'
+          }}
+        uses: actions/download-artifact@v4
+        with:
+          name: PureLive-iOS-${{ needs.prepare.outputs.tag }}
+          path: release-assets/ios
+
+      - name: 下载 Android APK
+        if: >-
+          ${{
+            needs.prepare.outputs.target == 'all' ||
+            needs.prepare.outputs.target == 'android'
+          }}
+        uses: actions/download-artifact@v4
+        with:
+          name: PureLive-Android-${{ needs.prepare.outputs.tag }}
+          path: release-assets/android
+
+      - name: 下载 Windows ZIP
+        if: >-
+          ${{
+            needs.prepare.outputs.target == 'all' ||
+            needs.prepare.outputs.target == 'windows'
+          }}
+        uses: actions/download-artifact@v4
+        with:
+          name: PureLive-Windows-${{ needs.prepare.outputs.tag }}
+          path: release-assets/windows
+
+      - name: 检查本次 Release Assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TARGET="${{ needs.prepare.outputs.target }}"
+          VERSION="${{ needs.prepare.outputs.version }}"
+
+          IOS_COUNT=0
+          ANDROID_COUNT=0
+          WINDOWS_COUNT=0
+
+          if [ -d release-assets/ios ]; then
+            IOS_COUNT=$(find release-assets/ios -type f -name "*.ipa" | wc -l)
+          fi
+
+          if [ -d release-assets/android ]; then
+            ANDROID_COUNT=$(find release-assets/android -type f -name "*.apk" | wc -l)
+          fi
+
+          if [ -d release-assets/windows ]; then
+            WINDOWS_COUNT=$(find release-assets/windows -type f -name "*.zip" | wc -l)
+          fi
+
+          echo "TARGET=$TARGET"
+          echo "iOS IPA=$IOS_COUNT"
+          echo "Android APK=$ANDROID_COUNT"
+          echo "Windows ZIP=$WINDOWS_COUNT"
+
+          case "$TARGET" in
+            ios)
+              [ "$IOS_COUNT" -eq 2 ]
+              test -f "release-assets/ios/PureLive-${VERSION}-iOS-Official.ipa"
+              test -f "release-assets/ios/PureLive-${VERSION}-iOS-LiveContainer.ipa"
+              ;;
+            android)
+              [ "$ANDROID_COUNT" -eq 1 ]
+              test -f "release-assets/android/PureLive-${VERSION}-Android-arm64-v8a.apk"
+              ;;
+            windows)
+              [ "$WINDOWS_COUNT" -eq 1 ]
+              test -f "release-assets/windows/PureLive-${VERSION}-Windows.zip"
+              ;;
+            all)
+              [ "$IOS_COUNT" -eq 2 ]
+              [ "$ANDROID_COUNT" -eq 1 ]
+              [ "$WINDOWS_COUNT" -eq 1 ]
+              test -f "release-assets/ios/PureLive-${VERSION}-iOS-Official.ipa"
+              test -f "release-assets/ios/PureLive-${VERSION}-iOS-LiveContainer.ipa"
+              test -f "release-assets/android/PureLive-${VERSION}-Android-arm64-v8a.apk"
+              test -f "release-assets/windows/PureLive-${VERSION}-Windows.zip"
+              ;;
+          esac
+
+      - name: 创建或更新统一 Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          UPSTREAM="${{ needs.prepare.outputs.tag }}"
+          RELEASE_TAG="${{ needs.prepare.outputs.release_tag }}"
+          TARGET="${{ needs.prepare.outputs.target }}"
+
+          cat > release-notes.md <<EOF
+          根据上游 liuchuancong/pure_live ${UPSTREAM} 自动构建。
+
+          本次构建平台：${TARGET}
+
+          - iOS：官方版 + LiveContainer 优化版
+          - Android：仅 arm64-v8a
+          - Windows：仅 x64 ZIP
+          - 自定义：Twitch / SOOP
+
+          这是 GitHub Actions 自动构建的 Pre-release。
+          EOF
+
+          mapfile -t ASSETS < <(
+            find release-assets \
+              -type f \
+              \( -name "*.ipa" -o -name "*.apk" -o -name "*.zip" \) \
+              -print |
+              sort
+          )
+
+          if [ "${#ASSETS[@]}" -lt 1 ]; then
+            echo "❌ 没有 Release Assets"
+            exit 1
+          fi
+
+          if gh release view \
+            "$RELEASE_TAG" \
+            --repo "${{ github.repository }}" \
+            >/dev/null 2>&1; then
+            gh release upload \
+              "$RELEASE_TAG" \
+              "${ASSETS[@]}" \
+              --clobber \
+              --repo "${{ github.repository }}"
+
+            gh release edit \
+              "$RELEASE_TAG" \
+              --title "Pure Live ${UPSTREAM}" \
+              --notes-file release-notes.md \
+              --prerelease \
+              --latest=false \
+              --repo "${{ github.repository }}"
+          else
+            gh release create \
+              "$RELEASE_TAG" \
+              "${ASSETS[@]}" \
+              --title "Pure Live ${UPSTREAM}" \
+              --notes-file release-notes.md \
+              --prerelease \
+              --latest=false \
+              --target "${{ github.sha }}" \
+              --repo "${{ github.repository }}"
+          fi
+
+          echo "✅ 统一 Release 已更新：$RELEASE_TAG"
